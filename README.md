@@ -196,6 +196,7 @@ MCP session commands (after connecting):
   <@session> events-tail [--follow] [--all] [--agent <name>]
   <@session> events-ack <seq>... | --all [--agent <name>]
   <@session> events-status [--agent <name>]
+  <@session> events-deliver --agent <name> --claude-session <id> [--cwd <dir>]
   <@session> logging-set-level <level>
   <@session> ping
   <@session> server-discover
@@ -1250,6 +1251,12 @@ To get events into Claude Code sessions without channels, install the `mcpc-even
 this repository (in Claude Code: `/plugin install mcpc-events --marketplace caffeinum/mcpc`). Its SessionStart hook adds the agent's unacknowledged events to a new session's
 context, and its Stop hook keeps the agent working when new events arrived while it worked. Set
 `MCPC_AGENT` (and optionally `MCPC_EVENTS_SESSIONS`, e.g. `@office`) in the session's environment.
+
+To wake an idle agent when its events arrive, point a delivery target at its Claude Code session:
+`mcpc @office events-deliver --agent reviewer --claude-session <id> --cwd ~/repo`. The bridge then
+runs `claude -p --resume <id>` with a short nudge (allowed to run only `events-ack`), and the plugin's
+hooks show the events. A session Claude Code reports as running is left alone, since its own Stop
+hook delivers; each event wakes the agent at most once.
 
 Servers that declare the `claude/channel` capability ([Claude Code channels](https://code.claude.com/docs/en/channels))
 push messages without ids or replay. On MCP `2025-11-25` sessions `mcpc` journals each one under

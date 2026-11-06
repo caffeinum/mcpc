@@ -478,6 +478,7 @@ ${chalk.bold('MCP session commands (after connecting):')}
   <@session> ${theme.cyan('events-tail')} [--follow] [--all] [--agent <name>]
   <@session> ${theme.cyan('events-ack')} <seq>... | --all [--agent <name>]
   <@session> ${theme.cyan('events-status')} [--agent <name>]
+  <@session> ${theme.cyan('events-deliver')} --agent <name> --claude-session <id> [--cwd <dir>]
   <@session> ${theme.cyan('logging-set-level')} <level>
   <@session> ${theme.cyan('ping')}
   <@session> ${theme.cyan('server-discover')}
@@ -1612,6 +1613,40 @@ ${jsonHelp('`{ agent, ackedThrough, acked: [seq, ...], unacked }`')}`
       await events.ackEvents(session, seqs, {
         ...(options.all && { all: true }),
         ...(options.agent && { agent: options.agent }),
+        ...getOptionsFromCommand(command),
+      });
+    });
+
+  program
+    .command('events-deliver')
+    .description("Wake an agent's Claude session on new events.")
+    .option('--agent <name>', 'Agent whose events wake it (default: $MCPC_AGENT)')
+    .option('--claude-session <id>', 'Claude Code session id to resume')
+    .option('--cwd <dir>', 'Folder of that Claude session (default: current)')
+    .option('--plugin-dir <dir>', 'mcpc-events plugin dir, if not installed')
+    .option('--remove', 'Stop waking the agent')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Without --claude-session, lists the delivery targets. When events routed to
+  the agent arrive, the session bridge runs "claude -p --resume <id>" in the
+  folder with a short nudge; the mcpc-events plugin's hooks show the events.
+  A session Claude Code reports as running (claude agents --json) is not
+  resumed again: its own Stop hook delivers. Each event wakes it at most once;
+  unacknowledged events show again at the next session start.
+
+${chalk.bold('Example:')}
+  mcpc ${session} events-deliver --agent reviewer --claude-session 0f9b1d93-... --cwd ~/repo
+${jsonHelp('List: `[{ agent, driver: "claude", claudeSession, cwd, claudeBin, mcpcBin, pluginDir? }]`; add: the target with `saved: true`; --remove: `{ removed: true, agent }`')}`
+    )
+    .action(async (options, command) => {
+      await events.deliverEvents(session, {
+        ...(options.agent && { agent: options.agent }),
+        ...(options.claudeSession && { claudeSession: options.claudeSession }),
+        ...(options.cwd && { cwd: options.cwd }),
+        ...(options.pluginDir && { pluginDir: options.pluginDir }),
+        ...(options.remove && { remove: true }),
         ...getOptionsFromCommand(command),
       });
     });

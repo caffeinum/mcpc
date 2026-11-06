@@ -424,3 +424,115 @@ function formatRecord(record: JournalRecord): string {
   }
   return `${chalk.cyan(`#${record.seq}`)} ${chalk.bold(record.name)} ${chalk.dim(record.timestamp)} ${JSON.stringify(record.data)}`;
 }
+
+/** Absolute path of `name` on PATH, or undefined. */
+async function findOnPath(name: string): Promise<string | undefined> {
+  const { access } = await import('fs/promises');
+  const { constants } = await import('fs');
+  const { delimiter, join: joinPath } = await import('path');
+  for (const dir of (process.env.PATH ?? '').split(delimiter)) {
+    if (!dir) continue;
+    const candidate = joinPath(dir, name);
+    try {
+      await access(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // not here
+    }
+  }
+  return undefined;
+}
+
+/** List, add or remove the Claude Code session woken when events arrive for an agent. */
+export async function deliverEvents(
+  target: string,
+  options: EventsAgentOptions & {
+    claudeSession?: string;
+    cwd?: string;
+    pluginDir?: string;
+    remove?: boolean;
+  }
+): Promise<void> {
+  const { readDeliveries, removeDeliveryTarget, saveDeliveryTarget } =
+    await import('../../lib/event-delivery.js');
+  const { resolvePath } = await import('../../lib/utils.js');
+  if (!isValidSessionName(target)) {
+    throw new ClientError(
+      `Invalid session name: ${target}\nSession names must start with @ (e.g. @apify).`
+    );
+  }
+  const dir = getEventsDir(target);
+  const json = options.outputMode !== 'human';
+
+  if (options.remove) {
+    const agent = explicitAgent(options);
+    if (!agent)
+      throw new ClientError('Pass --agent <name> (or MCPC_AGENT) to remove a delivery target');
+    const removed = await removeDeliveryTarget(dir, agent);
+    if (!removed) throw new ClientError(`No delivery target for agent "${agent}" on ${target}`);
+    if (json) console.log(formatOutput({ removed: true, agent }, 'json'));
+    else console.log(formatSuccess(`Agent "${agent}" is no longer woken by ${target} events`));
+    return;
+  }
+
+  if (options.claudeSession === undefined) {
+    const { targets } = await readDeliveries(dir);
+    if (json) {
+      console.log(formatOutput(targets, 'json'));
+      return;
+    }
+    if (targets.length === 0) {
+      console.log(chalk.dim('No delivery targets.'));
+      console.log(
+        chalk.dim(
+          `To add one, run: mcpc ${target} events-deliver --agent <name> --claude-session <id>`
+        )
+      );
+      return;
+    }
+    for (const t of targets) {
+      console.log(
+        `${chalk.bold(t.agent)} → claude session ${t.claudeSession} ${chalk.dim(`in ${t.cwd}`)}`
+      );
+    }
+    return;
+  }
+
+  const agent = explicitAgent(options);
+  if (!agent)
+    throw new ClientError(
+      'Pass --agent <name> (or MCPC_AGENT): the agent whose events wake the session'
+    );
+  const claudeBin = await findOnPath('claude');
+  if (!claudeBin)
+    throw new ClientError('claude is not on PATH; install Claude Code to use --claude-session');
+  const entry = process.argv[1];
+  if (!entry) throw new ClientError('Cannot determine the mcpc entry point');
+  const deliveryTarget = {
+    agent,
+    driver: 'claude' as const,
+    claudeSession: options.claudeSession,
+    cwd: resolvePath(options.cwd ?? '.'),
+    claudeBin,
+    mcpcBin: `${process.execPath} ${entry}`,
+    ...(options.pluginDir && { pluginDir: resolvePath(options.pluginDir) }),
+  };
+  await saveDeliveryTarget(dir, deliveryTarget);
+  if (json) {
+    console.log(formatOutput({ saved: true, ...deliveryTarget }, 'json'));
+    return;
+  }
+  console.log(
+    formatSuccess(
+      `Events for "${agent}" on ${target} now wake Claude session ${options.claudeSession}`
+    )
+  );
+  console.log(
+    chalk.dim('The session resumes headless (claude -p) unless it is already running; its')
+  );
+  console.log(
+    chalk.dim(
+      'mcpc-events plugin hooks show it the events. Logs: ~/.mcpc/logs/deliver-' + agent + '.log'
+    )
+  );
+}

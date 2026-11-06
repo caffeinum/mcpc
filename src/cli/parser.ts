@@ -173,6 +173,7 @@ export const KNOWN_SESSION_COMMANDS = [
   'events-tail',
   'events-ack',
   'events-status',
+  'events-deliver',
   'prompts-list',
   'prompts-get',
   'completion-complete',

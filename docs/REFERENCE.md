@@ -52,6 +52,7 @@ New to mcpc? Start with the [README](../README.md), or run `mcpc help --skill` f
   - [`mcpc @<session> events-tail`](#mcpc-session-events-tail)
   - [`mcpc @<session> events-ack`](#mcpc-session-events-ack)
   - [`mcpc @<session> events-status`](#mcpc-session-events-status)
+  - [`mcpc @<session> events-deliver`](#mcpc-session-events-deliver)
   - [`mcpc @<session> logging-set-level`](#mcpc-session-logging-set-level)
   - [`mcpc @<session> ping`](#mcpc-session-ping)
   - [`mcpc @<session> server-discover`](#mcpc-session-server-discover)
@@ -115,6 +116,7 @@ MCP session commands (after connecting):
   <@session> events-tail [--follow] [--all] [--agent <name>]
   <@session> events-ack <seq>... | --all [--agent <name>]
   <@session> events-status [--agent <name>]
+  <@session> events-deliver --agent <name> --claude-session <id> [--cwd <dir>]
   <@session> logging-set-level <level>
   <@session> ping
   <@session> server-discover
@@ -580,6 +582,7 @@ Commands:
   events-route <name>                   Show or change which agents receive a subscription.
   events-tail                           Print journaled events not yet acknowledged.
   events-ack [seqs...]                  Acknowledge journaled events by seq.
+  events-deliver                        Wake an agent's Claude session on new events.
   events-status                         Show event subscriptions and unacknowledged counts.
   skills-list                           List the agent skills the server serves.
   skills-get <skill> [file]             Read a skill's SKILL.md, or one of its files (see below).
@@ -1282,6 +1285,36 @@ Options:
 JSON output (--json):
   Object:
   `{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, delivery?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`
+```
+
+### `mcpc @<session> events-deliver`
+
+```text
+Usage: mcpc @<session> events-deliver [options]
+
+Wake an agent's Claude session on new events.
+
+Options:
+  --agent <name>         Agent whose events wake it (default: $MCPC_AGENT)
+  --claude-session <id>  Claude Code session id to resume
+  --cwd <dir>            Folder of that Claude session (default: current)
+  --plugin-dir <dir>     mcpc-events plugin dir, if not installed
+  --remove               Stop waking the agent
+  --json                 Output in JSON format
+
+Notes:
+  Without --claude-session, lists the delivery targets. When events routed to
+  the agent arrive, the session bridge runs "claude -p --resume <id>" in the
+  folder with a short nudge; the mcpc-events plugin's hooks show the events.
+  A session Claude Code reports as running (claude agents --json) is not
+  resumed again: its own Stop hook delivers. Each event wakes it at most once;
+  unacknowledged events show again at the next session start.
+
+Example:
+  mcpc @<session> events-deliver --agent reviewer --claude-session 0f9b1d93-... --cwd ~/repo
+
+JSON output (--json):
+  List: `[{ agent, driver: "claude", claudeSession, cwd, claudeBin, mcpcBin, pluginDir? }]`; add: the target with `saved: true`; --remove: `{ removed: true, agent }`
 ```
 
 ### `mcpc @<session> logging-set-level`

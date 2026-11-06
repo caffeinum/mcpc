@@ -70,6 +70,7 @@ import { ResourceSyncManager } from './resource-sync.js';
 import { EventPoller } from './event-poller.js';
 import { CHANNEL_NOTIFICATION, ChannelReceiver, declaresChannel } from './channel-receiver.js';
 import { EventJournal, getEventsDir } from '../lib/event-journal.js';
+import { EventDeliverer } from '../lib/event-delivery.js';
 import { isModernProtocolVersion } from '../core/protocol.js';
 import type { AnyTask, DetachedToolCall, TaskUpdate, TasksPage } from '../lib/types.js';
 import { createRequire } from 'module';
@@ -155,6 +156,7 @@ class BridgeProcess {
   private resourceSync: ResourceSyncManager | null = null;
   private eventPoller: EventPoller | null = null;
   private channelReceiver: ChannelReceiver | null = null;
+  private eventDeliverer: EventDeliverer | null = null;
 
   // Handshake results persisted at the original connect, used only when this bridge
   // resumed a server-side session: resumption skips `initialize`, so the SDK client
@@ -547,6 +549,8 @@ class BridgeProcess {
         // Re-establish persisted resource subscriptions in the background —
         // failures are recorded per subscription, never block startup
         void this.restoreResourceSubscriptions();
+        // Wake agents for anything journaled while the bridge was down
+        this.eventDeliverer?.trigger();
         void this.eventPoller?.startAll().catch((error: unknown) => {
           logger.error('Failed to resume event subscriptions:', error);
         });
@@ -836,12 +840,20 @@ class BridgeProcess {
     // Events extension: poll loops write into a durable per-session journal
     // (events-subscribe / events-tail). Loops resume once the client is ready.
     const eventJournal = await EventJournal.open(getEventsDir(this.options.sessionName));
+    // events-deliver targets: wake an agent's Claude session when events arrive for it
+    const deliverer = new EventDeliverer({
+      sessionName: this.options.sessionName,
+      eventsDir: getEventsDir(this.options.sessionName),
+      logger: createLogger('deliver'),
+    });
+    this.eventDeliverer = deliverer;
     const streamIdleOverride = Number(process.env.MCPC_TEST_STREAM_IDLE_MILLIS);
     this.eventPoller = new EventPoller({
       poll: (params) => client.pollEvents(params),
       describe: async (name) => (await client.listEvents()).find((event) => event.name === name),
       stream: (params, handlers, signal) => client.streamEvents(params, handlers, signal),
       ...(streamIdleOverride > 0 && { streamIdleMillis: streamIdleOverride }),
+      onCommitted: () => deliverer.trigger(),
       journal: eventJournal,
       persist: (entries) =>
         updateSession(this.options.sessionName, { eventSubscriptions: entries }),
@@ -879,6 +891,7 @@ class BridgeProcess {
       const receiver = new ChannelReceiver({
         journal: eventJournal,
         logger: createLogger('channel'),
+        onCommitted: () => deliverer.trigger(),
       });
       this.channelReceiver = receiver;
       await receiver.start();
@@ -2118,6 +2131,7 @@ class BridgeProcess {
       logger.debug('Keepalive interval stopped');
     }
 
+    this.eventDeliverer?.stop();
     if (this.eventPoller) {
       await this.eventPoller.stopAll().catch((error: unknown) => {
         logger.warn('Failed to stop event polling:', error);
