@@ -398,7 +398,9 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
           ? chalk.red('terminated')
           : sub.lastError
             ? chalk.yellow('retrying')
-            : chalk.green('polling');
+            : 'delivery' in sub && sub.delivery?.includes('push')
+              ? chalk.green('streaming')
+              : chalk.green('polling');
     console.log(`${chalk.bold(sub.id)}  ${state}  ${chalk.dim(`${sub.unacked} unacked`)}`);
     if ('lastError' in sub && sub.lastError)
       console.log(chalk.dim(`  last error: ${sub.lastError}`));

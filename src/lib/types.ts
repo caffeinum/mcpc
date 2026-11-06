@@ -257,6 +257,7 @@ export interface EventSubscriptionEntry {
   id: string; // Event name, plus a digest of the arguments when there are any
   name: string;
   arguments?: Record<string, unknown>;
+  delivery?: Array<'poll' | 'push'>; // Modes mcpc uses for it: push for latency, poll as the truth
   subscribedAt: string; // ISO 8601
   lastError?: string; // Last poll failure (cleared on next success)
   terminatedAt?: string; // ISO 8601 — set when the server ended the subscription

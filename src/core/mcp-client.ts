@@ -50,11 +50,17 @@ import {
   validateCreatedTask,
 } from './tasks-schema.js';
 import {
+  AnyParamsSchema,
   ListEventsResultSchema,
   PollEventsResultSchema,
+  StreamEventsResultSchema,
+  SUBSCRIPTION_ID_META_KEY,
+  parseStreamNotification,
   type EventDescriptor,
+  type EventStreamHandlers,
   type PollEventsParams,
   type PollEventsResult,
+  type StreamEventsParams,
 } from './events-schema.js';
 import { CreatedTaskShim } from './tasks-result-shim.js';
 import { createNoOpLogger, type Logger } from '../lib/logger.js';
@@ -325,6 +331,11 @@ class TasksAwareClient extends SDKClient {
  * Provides a convenient interface to the MCP SDK Client with error handling and logging
  * Implements IMcpClient interface for compatibility with SessionClient
  */
+/** Longest delay a Node timer accepts: a long-lived request's effective "no timeout". */
+const MAX_TIMER_MILLIS = 2 ** 31 - 1;
+
+const noop = (): void => {};
+
 export class McpClient implements IMcpClient {
   private client: SDKClient;
   private logger: Logger;
@@ -1222,6 +1233,115 @@ export class McpClient implements IMcpClient {
       PollEventsResultSchema,
       this.getRequestOptions()
     );
+  }
+
+  /**
+   * Open one push subscription (`events/stream`) and deliver its notifications to
+   * `handlers` until the stream ends: the server closes it (resolves), `signal` aborts it,
+   * or the request fails (rejects, with the server's JSON-RPC error for an invalid
+   * subscription). The heartbeat, not a request timeout, is the liveness signal, so the
+   * request runs without one; callers watch heartbeats and abort a silent stream.
+   *
+   * Streams are told apart by the subscription id in each notification's `_meta`, which
+   * is the request id the SDK assigned. That id is not exposed, so streams open one at a
+   * time and each binds to the first `notifications/events/active` that names an unknown
+   * id.
+   */
+  async streamEvents(
+    params: StreamEventsParams,
+    handlers: EventStreamHandlers,
+    signal: AbortSignal
+  ): Promise<void> {
+    this.assertEventsAvailable();
+    this.installEventStreamDispatch();
+
+    const previousOpen = this.eventStreamOpening;
+    let releaseOpen!: () => void;
+    this.eventStreamOpening = new Promise<void>((resolve) => (releaseOpen = resolve));
+    await previousOpen;
+
+    let boundId: string | number | undefined;
+    const bound = new Promise<void>((resolve) => {
+      this.pendingEventStream = {
+        handlers,
+        bind: (id) => {
+          boundId = id;
+          this.eventStreams.set(id, handlers);
+          resolve();
+        },
+      };
+    });
+    const request = this.client.request(
+      { method: 'events/stream', params: { ...params } },
+      StreamEventsResultSchema,
+      { timeout: MAX_TIMER_MILLIS, signal }
+    );
+    void Promise.race([bound, request.then(noop, noop)]).finally(() => {
+      if (this.pendingEventStream?.handlers === handlers) this.pendingEventStream = undefined;
+      releaseOpen();
+    });
+    try {
+      await request;
+    } finally {
+      if (boundId !== undefined) this.eventStreams.delete(boundId);
+    }
+  }
+
+  private eventStreams = new Map<string | number, EventStreamHandlers>();
+  private pendingEventStream:
+    { handlers: EventStreamHandlers; bind: (id: string | number) => void } | undefined;
+  private eventStreamOpening: Promise<void> = Promise.resolve();
+  private eventStreamDispatchInstalled = false;
+
+  private installEventStreamDispatch(): void {
+    if (this.eventStreamDispatchInstalled) return;
+    this.eventStreamDispatchInstalled = true;
+    const kinds = ['active', 'event', 'heartbeat', 'error', 'terminated'] as const;
+    for (const kind of kinds) {
+      this.client.setNotificationHandler(
+        `notifications/events/${kind}`,
+        { params: AnyParamsSchema },
+        async (params) => {
+          const meta = params._meta as Record<string, unknown> | undefined;
+          const id = meta?.[SUBSCRIPTION_ID_META_KEY];
+          if (typeof id !== 'string' && typeof id !== 'number') {
+            this.logger.warn(`Dropping notifications/events/${kind} without a subscription id`);
+            return;
+          }
+          let handlers = this.eventStreams.get(id);
+          if (!handlers && kind === 'active' && this.pendingEventStream) {
+            const pending = this.pendingEventStream;
+            this.pendingEventStream = undefined;
+            pending.bind(id);
+            handlers = pending.handlers;
+          }
+          if (!handlers) {
+            this.logger.warn(`Dropping notifications/events/${kind} for unknown stream ${id}`);
+            return;
+          }
+          const parsed = parseStreamNotification(kind, params);
+          if (typeof parsed === 'string') {
+            await handlers.onError({
+              code: -32602,
+              message: `Malformed ${kind} notification: ${parsed}`,
+            });
+            return;
+          }
+          switch (parsed.kind) {
+            case 'active':
+              return handlers.onActive({ cursor: parsed.cursor, truncated: parsed.truncated });
+            case 'event':
+              return handlers.onEvent(parsed.event);
+            case 'heartbeat':
+              return handlers.onHeartbeat({ cursor: parsed.cursor });
+            case 'error':
+              return handlers.onError(parsed.error);
+            case 'terminated':
+              return handlers.onTerminated(parsed.error);
+          }
+        }
+      );
+    }
   }
 
   /**

@@ -220,3 +220,79 @@ export const PollEventsResultSchema = standardSchema<PollEventsResult>((value, i
   if (typeof value.nextPollMs === 'number') result.nextPollMs = value.nextPollMs;
   return result;
 });
+
+/** Parameters of `events/stream` (push delivery). */
+export interface StreamEventsParams {
+  name: string;
+  arguments?: Record<string, unknown>;
+  cursor: string | null;
+  maxAgeMs?: number;
+}
+
+/** The notifications one push stream delivers, already demultiplexed to that stream. */
+export interface EventStreamHandlers {
+  onActive: (params: { cursor: string | null; truncated: boolean }) => void | Promise<void>;
+  onEvent: (event: EventOccurrence & { cursor: string | null }) => void | Promise<void>;
+  onHeartbeat: (params: { cursor: string | null }) => void | Promise<void>;
+  onError: (error: { code: number; message: string; data?: unknown }) => void | Promise<void>;
+  onTerminated: (error: { code: number; message: string; data?: unknown }) => void | Promise<void>;
+}
+
+/** Key carrying the stream's subscription id (the `events/stream` request id) in `_meta`. */
+export const SUBSCRIPTION_ID_META_KEY = 'io.modelcontextprotocol/subscriptionId';
+
+/** Accepts any params object; each notification kind is checked by {@link parseStreamNotification}. */
+export const AnyParamsSchema = standardSchema<Record<string, unknown>>((value) =>
+  isRecord(value) ? value : {}
+);
+
+/** The final frame of `events/stream`: an empty result. */
+export const StreamEventsResultSchema = standardSchema<Record<string, unknown>>((value) =>
+  isRecord(value) ? value : {}
+);
+
+export type StreamNotification =
+  | { kind: 'active'; cursor: string | null; truncated: boolean }
+  | { kind: 'event'; event: EventOccurrence & { cursor: string | null } }
+  | { kind: 'heartbeat'; cursor: string | null }
+  | { kind: 'error' | 'terminated'; error: { code: number; message: string; data?: unknown } };
+
+/**
+ * Validate one `notifications/events/*` message. Returns an issue string instead of a
+ * value when it is malformed, so the caller can surface it rather than drop it silently.
+ */
+export function parseStreamNotification(
+  kind: 'active' | 'event' | 'heartbeat' | 'error' | 'terminated',
+  params: Record<string, unknown>
+): StreamNotification | string {
+  const cursor = params.cursor ?? null;
+  if (kind !== 'error' && kind !== 'terminated' && cursor !== null && typeof cursor !== 'string') {
+    return 'cursor must be a string or null';
+  }
+  switch (kind) {
+    case 'active':
+      return { kind, cursor: cursor as string | null, truncated: params.truncated === true };
+    case 'heartbeat':
+      return { kind, cursor: cursor as string | null };
+    case 'event': {
+      const issues: Issue[] = [];
+      const event = parseOccurrence(params, [], issues);
+      if (!event) return issues.map((i) => i.message).join('; ') || 'invalid event';
+      return { kind, event: { ...event, cursor: cursor as string | null } };
+    }
+    default: {
+      const error = params.error;
+      if (!isRecord(error) || typeof error.code !== 'number' || typeof error.message !== 'string') {
+        return 'error must be { code, message }';
+      }
+      return {
+        kind,
+        error: {
+          code: error.code,
+          message: error.message,
+          ...(error.data !== undefined && { data: error.data }),
+        },
+      };
+    }
+  }
+}

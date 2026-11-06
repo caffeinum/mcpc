@@ -26,7 +26,7 @@ export const ENTERPRISE_MANAGED_AUTH_EXTENSION_KEY =
 
 /**
  * Events — server-produced events a client subscribes to (`events/list`, `events/poll`,
- * `events/stream`, webhooks). mcpc uses poll delivery and journals every event durably.
+ * `events/stream`, webhooks). mcpc uses push and poll delivery and journals every event durably.
  *
  * Spec (Draft, SEP-3415): https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415
  */
@@ -116,7 +116,7 @@ export const MCP_EXTENSIONS: readonly McpExtension[] = [
     id: EVENTS_EXTENSION_KEY,
     label: 'events',
     support: 'full',
-    note: 'mcpc @session events-subscribe / events-tail / events-ack (poll delivery, durable local journal), on MCP 2026-07-28 connections',
+    note: 'mcpc @session events-subscribe / events-tail / events-ack (poll and push delivery, durable local journal), on MCP 2026-07-28 connections',
     declaredByClient: true,
   },
   {

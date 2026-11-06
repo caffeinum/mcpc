@@ -130,6 +130,12 @@ let truncateNextPoll = false;
 let rewindNextPollBy = 0;
 let eventsForbidden = false;
 const eventsRoutingLog: Array<{ method: string; mcpName: string | null }> = [];
+/** Push streams (events/stream) heartbeat this often, so suites detect silence fast. */
+const EVENTS_HEARTBEAT_MS = parseInt(process.env.EVENTS_HEARTBEAT_MS || '500', 10);
+/** Bumped by /control/drop-event-streams: every open events/stream ends. */
+let eventStreamGeneration = 0;
+let openEventStreams = 0;
+let eventStreamsOpened = 0;
 
 // ---------------------------------------------------------------------------
 // Tasks extension (io.modelcontextprotocol/tasks, MCP 2026-07-28)
@@ -645,8 +651,91 @@ function createTestServer(ctx?: McpRequestContext): Server {
             inputSchema: { type: 'object', properties: { tag: { type: 'string' } } },
             payloadSchema: { type: 'object', properties: { n: { type: 'number' } } },
           },
+          {
+            name: 'test.live',
+            description: 'The same outbox as test.durable, also offered over push (events/stream)',
+            delivery: ['poll', 'push'],
+            inputSchema: { type: 'object', properties: { tag: { type: 'string' } } },
+            payloadSchema: { type: 'object', properties: { n: { type: 'number' } } },
+          },
         ],
       })
+    );
+
+    server.setRequestHandler(
+      'events/stream',
+      {
+        params: passthroughSchema<{
+          name: string;
+          arguments?: { tag?: string };
+          cursor?: string | null;
+        }>(),
+      },
+      async (params, reqCtx) => {
+        eventsRoutingLog.push({
+          method: 'events/stream',
+          mcpName: ctx?.requestInfo?.headers.get('mcp-name') ?? null,
+        });
+        if (params.name !== 'test.live') {
+          throw new ProtocolError(EVENTS_NOT_FOUND, 'NotFound', { kind: 'event' });
+        }
+        if (eventsForbidden) {
+          throw new ProtocolError(EVENTS_FORBIDDEN, 'Forbidden', { reason: 'Access revoked' });
+        }
+        const subscriptionId = reqCtx.mcpReq.id;
+        const meta = { 'io.modelcontextprotocol/subscriptionId': subscriptionId };
+        const head = (): number => eventOutbox.at(-1)?.seq ?? 0;
+        let position =
+          params.cursor === null || params.cursor === undefined ? head() : Number(params.cursor);
+        const generation = eventStreamGeneration;
+        const tag = params.arguments?.tag;
+        openEventStreams++;
+        eventStreamsOpened++;
+        try {
+          await reqCtx.mcpReq.notify({
+            method: 'notifications/events/active',
+            params: { cursor: String(position), truncated: false, _meta: meta },
+          });
+          let lastBeat = Date.now();
+          while (!reqCtx.mcpReq.signal.aborted && generation === eventStreamGeneration) {
+            if (eventsForbidden) {
+              await reqCtx.mcpReq.notify({
+                method: 'notifications/events/terminated',
+                params: {
+                  error: {
+                    code: EVENTS_FORBIDDEN,
+                    message: 'Forbidden',
+                    data: { reason: 'Access revoked' },
+                  },
+                  _meta: meta,
+                },
+              });
+              break;
+            }
+            for (const event of eventOutbox.filter((e) => e.seq > position)) {
+              position = event.seq;
+              if (tag !== undefined && event.data.tag !== tag) continue;
+              const { seq: _seq, ...occurrence } = event;
+              occurrence.name = params.name;
+              await reqCtx.mcpReq.notify({
+                method: 'notifications/events/event',
+                params: { ...occurrence, cursor: String(position), _meta: meta },
+              });
+            }
+            if (Date.now() - lastBeat >= EVENTS_HEARTBEAT_MS) {
+              lastBeat = Date.now();
+              await reqCtx.mcpReq.notify({
+                method: 'notifications/events/heartbeat',
+                params: { cursor: String(position), _meta: meta },
+              });
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        } finally {
+          openEventStreams--;
+        }
+        return { _meta: meta };
+      }
     );
 
     server.setRequestHandler(
@@ -669,7 +758,7 @@ function createTestServer(ctx?: McpRequestContext): Server {
         if (shouldFail()) {
           throw new Error('Simulated failure');
         }
-        if (params.name !== 'test.durable') {
+        if (params.name !== 'test.durable' && params.name !== 'test.live') {
           throw new ProtocolError(EVENTS_NOT_FOUND, 'NotFound', { kind: 'event' });
         }
         if (eventsForbidden) {
@@ -710,7 +799,7 @@ function createTestServer(ctx?: McpRequestContext): Server {
           ...pollEnvelope,
           events: batch
             .filter((e) => tag === undefined || e.data.tag === tag)
-            .map(({ seq: _seq, ...event }) => event),
+            .map(({ seq: _seq, ...event }) => ({ ...event, name: params.name })),
           cursor: String(cursor),
           truncated: false,
           hasMore: pending.length > batch.length,
@@ -826,6 +915,12 @@ async function main() {
         return;
       }
 
+      if (action === 'get-event-streams' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ open: openEventStreams, opened: eventStreamsOpened }));
+        return;
+      }
+
       if (action === 'get-events-routing' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ routing: eventsRoutingLog }));
@@ -883,6 +978,12 @@ async function main() {
           res.end(`Next events/poll replays ${rewindNextPollBy} delivered events`);
           return;
 
+        case 'drop-event-streams':
+          eventStreamGeneration++;
+          res.writeHead(200);
+          res.end('Every open events/stream ends now');
+          return;
+
         case 'forbid-events':
           eventsForbidden = true;
           res.writeHead(200);
@@ -895,6 +996,7 @@ async function main() {
           rewindNextPollBy = 0;
           eventsForbidden = false;
           eventsRoutingLog.length = 0;
+          eventStreamGeneration++;
           failNextCount = 0;
           counterValue = 0;
           lastClientCapabilities = null;

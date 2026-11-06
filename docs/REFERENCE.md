@@ -1113,8 +1113,10 @@ Options:
   --json          Output in JSON format
 
 Behavior:
-  The session bridge polls the event type and appends every event to a durable
-  journal (~/.mcpc/events/<session>/) before advancing its cursor, so events
+  The session bridge receives the event type (over events/stream when the server
+  offers push, else by polling; a dropped stream is caught up by polling) and
+  appends every event to a durable journal (~/.mcpc/events/<session>/) before
+  advancing its cursor, so events
   survive bridge crashes and restarts. Delivery starts now: earlier events are
   not replayed. Subscriptions resume automatically when the session restarts.
   Arguments filter or shape the events, as in tools-call (key:=value or JSON).
@@ -1131,7 +1133,7 @@ Examples:
   MCPC_AGENT=triage mcpc @<session> events-subscribe ticket.created --route data.assignee
 
 JSON output (--json):
-  `{ subscribed: true, id, name, arguments?, subscribedAt, route: { agents?, path? } }`
+  `{ subscribed: true, id, name, arguments?, delivery: ["poll"|"push", ...], subscribedAt, route: { agents?, path? } }`
 ```
 
 ### `mcpc @<session> events-unsubscribe`
@@ -1251,7 +1253,7 @@ Options:
 
 JSON output (--json):
   Object:
-  `{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`
+  `{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, delivery?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`
 ```
 
 ### `mcpc @<session> logging-set-level`

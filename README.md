@@ -1020,7 +1020,7 @@ client and server capabilities. Where `mcpc` stands on the
 | [Skills](https://modelcontextprotocol.io/extensions/skills/overview)                                           | `io.modelcontextprotocol/skills`                           | ✅ [`skills-list`, `skills-get`, `resources-directory-read`](#skills) (MCP 2026-07-28 servers) |
 | [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)                                           | `io.modelcontextprotocol/ui`                               | ❌ Interactive HTML interfaces have no equivalent on a terminal                |
 | [Tasks](https://modelcontextprotocol.io/extensions/tasks/overview)                                             | `io.modelcontextprotocol/tasks`                            | ✅ [`tools-call --task/--detach`, `tasks-get`, `tasks-result`, `tasks-cancel`, `tasks-list`](#async-tasks) (MCP 2026-07-28 servers) |
-| [Events](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415) (Draft)                       | `io.modelcontextprotocol/events`                           | ✅ [`events-subscribe`, `events-tail`, `events-ack`](#events) (MCP 2026-07-28 servers, poll delivery) |
+| [Events](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415) (Draft)                       | `io.modelcontextprotocol/events`                           | ✅ [`events-subscribe`, `events-tail`, `events-ack`](#events) (MCP 2026-07-28 servers, poll and push delivery) |
 
 The two auth extensions and tasks are the ones a client declares: `mcpc` declares all three to
 every server it connects to, so a server can tell what this client can do before any token is
@@ -1206,10 +1206,11 @@ whether there were more. Completion works the same on `2025-11-25` and `2026-07-
 
 ### Events
 
-Implements poll delivery of the draft [MCP Events extension](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415)
+Implements poll and push delivery of the draft [MCP Events extension](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415)
 (`io.modelcontextprotocol/events`, SEP-3415), which requires MCP `2026-07-28` or later.
 
-The session bridge polls each subscribed event type and appends every event to a durable journal
+The session bridge receives each subscribed event type (over a long-lived `events/stream` when the
+server offers push, polling otherwise and after any stream drop) and appends every event to a durable journal
 under `~/.mcpc/events/<session>/` before it advances the subscription's cursor, so events survive
 bridge crashes and restarts and are never journaled twice. Consumers read the journal with
 `events-tail`, which redelivers an event until it is acknowledged, and works while the bridge is down:

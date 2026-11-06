@@ -1453,8 +1453,10 @@ ${jsonHelp(
       'after',
       `
 ${chalk.bold('Behavior:')}
-  The session bridge polls the event type and appends every event to a durable
-  journal (~/.mcpc/events/<session>/) before advancing its cursor, so events
+  The session bridge receives the event type (over events/stream when the server
+  offers push, else by polling; a dropped stream is caught up by polling) and
+  appends every event to a durable journal (~/.mcpc/events/<session>/) before
+  advancing its cursor, so events
   survive bridge crashes and restarts. Delivery starts now: earlier events are
   not replayed. Subscriptions resume automatically when the session restarts.
   Arguments filter or shape the events, as in tools-call (key:=value or JSON).
@@ -1469,7 +1471,7 @@ ${chalk.bold('Agents:')}
 ${chalk.bold('Examples:')}
   mcpc ${session} events-subscribe email.received from:="*@example.com"
   MCPC_AGENT=triage mcpc ${session} events-subscribe ticket.created --route data.assignee
-${jsonHelp('`{ subscribed: true, id, name, arguments?, subscribedAt, route: { agents?, path? } }`')}`
+${jsonHelp('`{ subscribed: true, id, name, arguments?, delivery: ["poll"|"push", ...], subscribedAt, route: { agents?, path? } }`')}`
     )
     .action(async (name, args, options, command) => {
       await events.subscribeEvents(session, name, {
@@ -1598,7 +1600,7 @@ ${jsonHelp('`{ agent, ackedThrough, acked: [seq, ...], unacked }`')}`
       'after',
       jsonHelp(
         'Object',
-        '`{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`'
+        '`{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, delivery?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`'
       )
     )
     .action(async (options, command) => {

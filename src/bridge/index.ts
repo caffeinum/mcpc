@@ -836,8 +836,12 @@ class BridgeProcess {
     // Events extension: poll loops write into a durable per-session journal
     // (events-subscribe / events-tail). Loops resume once the client is ready.
     const eventJournal = await EventJournal.open(getEventsDir(this.options.sessionName));
+    const streamIdleOverride = Number(process.env.MCPC_TEST_STREAM_IDLE_MILLIS);
     this.eventPoller = new EventPoller({
       poll: (params) => client.pollEvents(params),
+      describe: async (name) => (await client.listEvents()).find((event) => event.name === name),
+      stream: (params, handlers, signal) => client.streamEvents(params, handlers, signal),
+      ...(streamIdleOverride > 0 && { streamIdleMillis: streamIdleOverride }),
       journal: eventJournal,
       persist: (entries) =>
         updateSession(this.options.sessionName, { eventSubscriptions: entries }),

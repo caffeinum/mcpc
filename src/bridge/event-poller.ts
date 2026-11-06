@@ -1,7 +1,10 @@
 /**
- * Event subscriptions for the bridge process (SEP-3415 poll delivery).
+ * Event subscriptions for the bridge process (SEP-3415 poll and push delivery).
  *
- * One poll loop per subscription. Every batch is committed to the session's
+ * One loop per subscription. Event types offering push are received over a long-lived
+ * `events/stream` for latency; when the stream ends or goes silent for longer than twice
+ * the heartbeat interval, the loop catches up by polling from the journaled cursor (if the
+ * type offers poll) and reopens the stream. Poll-only types use a plain poll loop. Every batch is committed to the session's
  * {@link EventJournal} before the next poll, so events are durable before the cursor that
  * covers them moves. The loop follows the spec's pacing: drain immediately while
  * `hasMore`, otherwise wait the server's `nextPollMs` (never less than a 1 s floor), and
@@ -15,7 +18,13 @@
  */
 
 import type { EventSubscriptionEntry } from '../lib/types.js';
-import type { PollEventsParams, PollEventsResult } from '../core/events-schema.js';
+import type {
+  EventDescriptor,
+  EventStreamHandlers,
+  PollEventsParams,
+  PollEventsResult,
+  StreamEventsParams,
+} from '../core/events-schema.js';
 import {
   EVENTS_ERROR_FORBIDDEN,
   EVENTS_ERROR_NOT_FOUND,
@@ -33,6 +42,8 @@ import type { Logger } from '../lib/logger.js';
 export const MIN_POLL_INTERVAL_MILLIS = 1000;
 /** Used when the server sends no `nextPollMs`. */
 export const DEFAULT_POLL_INTERVAL_MILLIS = 5000;
+/** A push stream silent this long is dead (the spec: twice the 30 s heartbeat, plus slack). */
+export const STREAM_IDLE_TIMEOUT_MILLIS = 65_000;
 const INITIAL_BACKOFF_MILLIS = 1000;
 const MAX_BACKOFF_MILLIS = 30_000;
 
@@ -50,9 +61,43 @@ export interface EventPollerOptions {
   journal: EventJournal;
   persist: (entries: Record<string, EventSubscriptionEntry>) => Promise<void>;
   logger: Logger;
+  /** Look up an event type's descriptor (`events/list`), to choose its delivery mode. */
+  describe?: (name: string) => Promise<EventDescriptor | undefined>;
+  /** Run one push stream until it ends (see McpClient.streamEvents). */
+  stream?: (
+    params: StreamEventsParams,
+    handlers: EventStreamHandlers,
+    signal: AbortSignal
+  ) => Promise<void>;
   /** Called after records are durably journaled (e.g. to wake followers). */
   onCommitted?: (records: JournalRecord[]) => void;
   minIntervalMillis?: number;
+  streamIdleMillis?: number;
+}
+
+type Mode = 'poll' | 'push';
+
+/** A promise with its settle functions, for "the stream is up" during subscribe. */
+interface Deferred {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  settled: boolean;
+}
+
+function deferred(): Deferred {
+  const d = { settled: false } as Deferred;
+  d.promise = new Promise<void>((resolve, reject) => {
+    d.resolve = () => {
+      d.settled = true;
+      resolve();
+    };
+    d.reject = (error) => {
+      d.settled = true;
+      reject(error);
+    };
+  });
+  return d;
 }
 
 interface Loop {
@@ -97,23 +142,62 @@ export class EventPoller {
     const existing = this.entries.get(id);
     if (existing && !existing.terminatedAt) return existing;
 
-    const result = await this.options.poll({
-      name,
-      ...(args && { arguments: args }),
-      cursor: null,
-    });
-    await this.commit(id, name, result, { bootstrap: true });
-
+    const delivery = await this.chooseDelivery(name);
     const entry: EventSubscriptionEntry = {
       id,
       name,
       ...(args && Object.keys(args).length > 0 && { arguments: args }),
+      delivery,
       subscribedAt: new Date().toISOString(),
     };
+
+    if (delivery.includes('poll')) {
+      // Bootstrap with a null cursor ("start from now"), which also validates the
+      // subscription; a push stream then resumes from the cursor it returned.
+      const result = await this.options.poll({
+        name,
+        ...(args && { arguments: args }),
+        cursor: null,
+      });
+      await this.commit(id, name, result, { bootstrap: true });
+      this.entries.set(id, entry);
+      await this.persist();
+      this.startLoop(id, result);
+      return entry;
+    }
+
+    // Push only: the subscription is valid once the stream confirms it.
     this.entries.set(id, entry);
+    const ready = deferred();
+    this.startLoop(id, undefined, ready);
+    try {
+      await ready.promise;
+    } catch (error) {
+      this.loops.get(id)?.stop();
+      this.loops.delete(id);
+      this.entries.delete(id);
+      throw error;
+    }
     await this.persist();
-    this.startLoop(id, result);
     return entry;
+  }
+
+  /** Delivery modes mcpc can use for an event type: push when offered, poll when offered. */
+  private async chooseDelivery(name: string): Promise<Mode[]> {
+    const descriptor = this.options.describe ? await this.options.describe(name) : undefined;
+    // Unknown here (no events/list, or not listed): poll, whose answer is authoritative.
+    if (!descriptor) return ['poll'];
+    const modes = descriptor.delivery.filter(
+      (mode): mode is Mode =>
+        mode === 'poll' || (mode === 'push' && this.options.stream !== undefined)
+    );
+    if (modes.length === 0) {
+      throw new ClientError(
+        `Event type ${name} is only offered over ${descriptor.delivery.join(', ')} delivery, ` +
+          'which mcpc cannot use (webhooks need a public HTTPS endpoint).'
+      );
+    }
+    return modes;
   }
 
   /** Unsubscribe by id or, when unambiguous, by event name. Journaled records are kept. */
@@ -172,9 +256,13 @@ export class EventPoller {
     );
   }
 
-  private startLoop(id: string, previous?: PollEventsResult): void {
+  private startLoop(id: string, previous?: PollEventsResult, ready?: Deferred): void {
     const controller = new AbortController();
-    const done = this.runLoop(id, controller.signal, previous).catch((error: unknown) => {
+    const push = this.entries.get(id)?.delivery?.includes('push') && this.options.stream;
+    const run = push
+      ? this.runStreamLoop(id, controller.signal, ready)
+      : this.runLoop(id, controller.signal, previous);
+    const done = run.catch((error: unknown) => {
       this.options.logger.error(`Event loop for ${id} crashed:`, error);
     });
     this.loops.set(id, { stop: () => controller.abort(), done });
@@ -221,6 +309,182 @@ export class EventPoller {
         if (entry.lastError !== message) await this.updateEntry(id, { lastError: message });
         delayMillis = backoffMillis;
         backoffMillis = Math.min(backoffMillis * 2, MAX_BACKOFF_MILLIS);
+      }
+    }
+  }
+
+  /**
+   * Push delivery: keep one `events/stream` open, journal what it delivers, and when it
+   * ends or goes silent, catch up by polling (when offered) before reopening it.
+   */
+  private async runStreamLoop(id: string, signal: AbortSignal, ready?: Deferred): Promise<void> {
+    const stream = this.options.stream;
+    if (!stream) return;
+    const idleMillis = this.options.streamIdleMillis ?? STREAM_IDLE_TIMEOUT_MILLIS;
+    let backoffMillis = INITIAL_BACKOFF_MILLIS;
+    let everActive = false;
+
+    while (!signal.aborted && !this.closed) {
+      const entry = this.entries.get(id);
+      if (!entry) return;
+      const startCursor = this.options.journal.getCursor(id)?.cursor ?? null;
+      if (everActive && startCursor === null) {
+        await this.writeRecords(
+          id,
+          [
+            this.gap(
+              id,
+              entry.name,
+              'no-replay',
+              'push stream reconnected; events in between cannot be replayed'
+            ),
+          ],
+          null
+        );
+      }
+
+      const streamAbort = new AbortController();
+      const onStop = (): void => streamAbort.abort();
+      signal.addEventListener('abort', onStop, { once: true });
+      let idleTimer: NodeJS.Timeout | undefined;
+      const touch = (): void => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          this.options.logger.warn(
+            `Push stream for ${id} silent for ${idleMillis}ms; reconnecting`
+          );
+          streamAbort.abort();
+        }, idleMillis);
+        idleTimer.unref?.();
+      };
+      let active = false;
+      let terminated = false;
+
+      try {
+        touch();
+        await stream(
+          {
+            name: entry.name,
+            ...(entry.arguments && { arguments: entry.arguments }),
+            cursor: startCursor,
+          },
+          {
+            onActive: async ({ cursor, truncated }) => {
+              touch();
+              active = true;
+              everActive = true;
+              backoffMillis = INITIAL_BACKOFF_MILLIS;
+              const batch =
+                truncated && startCursor !== null && cursor !== null
+                  ? [
+                      this.gap(
+                        id,
+                        entry.name,
+                        'truncated',
+                        'the server skipped events past our cursor'
+                      ),
+                    ]
+                  : [];
+              await this.writeRecords(id, batch, cursor);
+              if (entry.lastError) await this.clearError(id);
+              ready?.resolve();
+            },
+            onEvent: async (event) => {
+              touch();
+              await this.writeRecords(
+                id,
+                [
+                  {
+                    kind: 'event',
+                    sub: id,
+                    name: event.name,
+                    eventId: event.eventId,
+                    timestamp: event.timestamp,
+                    receivedAt: new Date().toISOString(),
+                    data: event.data,
+                    ...(event._meta && { _meta: event._meta }),
+                  },
+                ],
+                event.cursor
+              );
+            },
+            onHeartbeat: async ({ cursor }) => {
+              touch();
+              await this.writeRecords(id, [], cursor);
+            },
+            onError: async (error) => {
+              touch();
+              const message = `${error.code}: ${error.message}`;
+              this.options.logger.warn(`Push stream for ${id} reported an error: ${message}`);
+              await this.updateEntry(id, { lastError: message });
+            },
+            onTerminated: async (error) => {
+              terminated = true;
+              await this.terminate(id, entry.name, error.code, error.message);
+              streamAbort.abort();
+            },
+          },
+          streamAbort.signal
+        );
+      } catch (error) {
+        if (signal.aborted || terminated) return;
+        const code = (error as { code?: unknown }).code;
+        const message = (error as Error).message;
+        if (!active && typeof code === 'number' && TERMINAL_ERROR_CODES.has(code)) {
+          if (ready && !ready.settled) {
+            ready.reject(error);
+            return;
+          }
+          await this.terminate(id, entry.name, code, message);
+          return;
+        }
+        if (!streamAbort.signal.aborted) {
+          this.options.logger.warn(`Push stream for ${id} failed: ${message}`);
+          if (entry.lastError !== message) await this.updateEntry(id, { lastError: message });
+        }
+      } finally {
+        clearTimeout(idleTimer);
+        signal.removeEventListener('abort', onStop);
+      }
+      if (signal.aborted || terminated || this.closed) return;
+
+      if (entry.delivery?.includes('poll')) {
+        if (await this.catchUp(id, signal)) return;
+      }
+      if (active) {
+        // Never spin on a server that closes every stream at once.
+        await abortableSleep(this.options.minIntervalMillis ?? MIN_POLL_INTERVAL_MILLIS, signal);
+      } else {
+        await abortableSleep(backoffMillis, signal);
+        backoffMillis = Math.min(backoffMillis * 2, MAX_BACKOFF_MILLIS);
+      }
+    }
+  }
+
+  /**
+   * Poll from the journaled cursor until the server has nothing more, so a dropped push
+   * stream loses nothing the server can replay. Returns true when the subscription ended.
+   */
+  private async catchUp(id: string, signal: AbortSignal): Promise<boolean> {
+    for (;;) {
+      const entry = this.entries.get(id);
+      if (!entry || signal.aborted) return true;
+      try {
+        const result = await this.options.poll({
+          name: entry.name,
+          ...(entry.arguments && { arguments: entry.arguments }),
+          cursor: this.options.journal.getCursor(id)?.cursor ?? null,
+        });
+        await this.commit(id, entry.name, result, { bootstrap: false });
+        if (!result.hasMore || result.events.length === 0) return false;
+      } catch (error) {
+        const code = (error as { code?: unknown }).code;
+        if (typeof code === 'number' && TERMINAL_ERROR_CODES.has(code)) {
+          await this.terminate(id, entry.name, code, (error as Error).message);
+          return true;
+        }
+        this.options.logger.warn(`Catch-up poll for ${id} failed: ${(error as Error).message}`);
+        return false;
       }
     }
   }
