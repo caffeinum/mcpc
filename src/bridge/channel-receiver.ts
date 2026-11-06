@@ -22,7 +22,7 @@ export const CHANNEL_NOTIFICATION = 'notifications/claude/channel';
 export const CHANNEL_SUBSCRIPTION = 'claude/channel';
 
 /** `meta` keys a server may use to identify a message; the first present one dedupes it. */
-const ID_META_KEYS = ['message_id', 'messageId', 'id', 'event_id', 'eventId'] as const;
+const ID_META_KEYS = ['message_id', 'messageId', 'msg_id', 'id', 'event_id', 'eventId'] as const;
 
 export interface ChannelReceiverOptions {
   journal: EventJournal;

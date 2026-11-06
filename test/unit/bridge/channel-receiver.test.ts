@@ -53,6 +53,16 @@ describe('ChannelReceiver', () => {
     expect(await readJournal(dir)).toHaveLength(1);
   });
 
+  it('dedupes by msg_id, the key Agent Office uses', async () => {
+    const r = await receiver();
+    await r.start();
+    await r.handle({ content: 'a', meta: { msg_id: 'm-1', kind: 'dm' } });
+    await r.handle({ content: 'a', meta: { msg_id: 'm-1', kind: 'dm' } });
+    const records = await readJournal(dir);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.kind === 'event' && records[0].eventId).toBe('m-1');
+  });
+
   it('records a disconnected gap when a previous bridge was listening', async () => {
     const first = await receiver();
     await first.start();
