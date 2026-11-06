@@ -26,6 +26,14 @@ import {
   validateAgentName,
   type JournalRecord,
 } from '../../lib/event-journal.js';
+import {
+  isRoutedTo,
+  isUnrouted,
+  readRouting,
+  updateRoute,
+  validateRoutePath,
+  type SubscriptionRoute,
+} from '../../lib/event-routing.js';
 import { withMcpClient } from '../helpers.js';
 import { CHANNEL_SUBSCRIPTION } from '../../bridge/channel-receiver.js';
 import { readCommandArgs } from '../parser.js';
@@ -71,20 +79,37 @@ export async function listEvents(target: string, options: CommandOptions): Promi
   });
 }
 
+/** The agent named on the command line or by MCPC_AGENT, or undefined for "everyone". */
+function explicitAgent(options: { agent?: string }): string | undefined {
+  const agent = options.agent ?? process.env.MCPC_AGENT;
+  if (agent !== undefined) validateAgentName(agent);
+  return agent;
+}
+
 export async function subscribeEvents(
   target: string,
   name: string,
-  options: CommandOptions & { args?: string[] }
+  options: EventsAgentOptions & { args?: string[]; route?: string }
 ): Promise<void> {
   const args = await readCommandArgs(options.args);
   const hasArgs = Object.keys(args).length > 0;
+  const agent = explicitAgent(options);
+  if (options.route !== undefined) validateRoutePath(options.route);
   await withMcpClient(target, options, async (client) => {
     const entry = await client.subscribeEvents(name, hasArgs ? args : undefined);
+    const route =
+      agent !== undefined || options.route !== undefined
+        ? await updateRoute(getEventsDir(target), entry.id, {
+            ...(agent !== undefined && { addAgents: [agent] }),
+            ...(options.route !== undefined && { path: options.route }),
+          })
+        : (await readRouting(getEventsDir(target))).subs[entry.id];
     if (options.outputMode !== 'human') {
-      console.log(formatOutput({ subscribed: true, ...entry }, 'json'));
+      console.log(formatOutput({ subscribed: true, ...entry, route: route ?? {} }, 'json'));
       return;
     }
     console.log(formatSuccess(`Subscribed to events: ${entry.id}`));
+    console.log(`Delivered to: ${describeAudience(route)}`);
     console.log(chalk.dim('Events are journaled while the session bridge runs, starting now.'));
     console.log(chalk.dim(`To read them, run: mcpc ${target} events-tail --follow`));
   });
@@ -92,11 +117,33 @@ export async function subscribeEvents(
 
 export async function unsubscribeEvents(
   target: string,
-  id: string,
-  options: CommandOptions
+  idOrName: string,
+  options: EventsAgentOptions
 ): Promise<void> {
+  const agent = explicitAgent(options);
+  const dir = getEventsDir(target);
+  if (agent !== undefined) {
+    // One agent leaving a shared subscription keeps it running for the others.
+    const id = await resolveSubscriptionId(target, idOrName);
+    const route = await updateRoute(dir, id, { removeAgents: [agent] });
+    if (route.agents?.length) {
+      if (options.outputMode !== 'human') {
+        console.log(
+          formatOutput({ unsubscribed: true, id, agent, remainingAgents: route.agents }, 'json')
+        );
+        return;
+      }
+      console.log(formatSuccess(`Agent "${agent}" no longer receives ${id}`));
+      console.log(chalk.dim(`Still delivered to: ${route.agents.join(', ')}`));
+      return;
+    }
+  }
   await withMcpClient(target, options, async (client) => {
-    const entry = await client.unsubscribeEvents(id);
+    const entry = await client.unsubscribeEvents(idOrName);
+    await updateRoute(dir, entry.id, {
+      removeAgents: (await readRouting(dir)).subs[entry.id]?.agents ?? [],
+      path: null,
+    });
     if (options.outputMode !== 'human') {
       console.log(formatOutput({ unsubscribed: true, id: entry.id, name: entry.name }, 'json'));
       return;
@@ -104,6 +151,64 @@ export async function unsubscribeEvents(
     console.log(formatSuccess(`Unsubscribed from events: ${entry.id}`));
     console.log(chalk.dim(`Journaled events are kept; read them with: mcpc ${target} events-tail`));
   });
+}
+
+/** A subscription id from an id or an unambiguous event name, via the session record. */
+async function resolveSubscriptionId(target: string, idOrName: string): Promise<string> {
+  if (idOrName === CHANNEL_SUBSCRIPTION) return idOrName;
+  const { getSession } = await import('../../lib/sessions.js');
+  const entries = Object.values((await getSession(target))?.eventSubscriptions ?? {});
+  if (entries.some((e) => e.id === idOrName)) return idOrName;
+  const byName = entries.filter((e) => e.name === idOrName);
+  if (byName.length === 1 && byName[0]) return byName[0].id;
+  throw new ClientError(
+    byName.length > 1
+      ? `Several subscriptions to ${idOrName} exist; pass the subscription id:\n${byName.map((e) => `  ${e.id}`).join('\n')}`
+      : `No event subscription matches ${idOrName}.\nTo list subscriptions, run: mcpc ${target} events-status`
+  );
+}
+
+function describeAudience(route: SubscriptionRoute | undefined): string {
+  const agents = route?.agents?.length ? route.agents.join(', ') : 'every agent';
+  return route?.path
+    ? `${agents}; addressed records only to the agents named at ${route.path}`
+    : agents;
+}
+
+/** Show or change who receives a subscription's records (any subscription, incl. claude/channel). */
+export async function routeEvents(
+  target: string,
+  idOrName: string,
+  options: CommandOptions & {
+    add?: string[];
+    remove?: string[];
+    path?: string;
+    clearPath?: boolean;
+  }
+): Promise<void> {
+  const dir = await requireEventsDir(target);
+  if (options.path !== undefined && options.clearPath) {
+    throw new ClientError('Pass either --path or --clear-path, not both');
+  }
+  const id = await resolveSubscriptionId(target, idOrName);
+  const changing =
+    (options.add?.length ?? 0) > 0 ||
+    (options.remove?.length ?? 0) > 0 ||
+    options.path !== undefined ||
+    options.clearPath;
+  const route = changing
+    ? await updateRoute(dir, id, {
+        ...(options.add && { addAgents: options.add }),
+        ...(options.remove && { removeAgents: options.remove }),
+        ...(options.path !== undefined && { path: options.path }),
+        ...(options.clearPath && { path: null }),
+      })
+    : ((await readRouting(dir)).subs[id] ?? {});
+  if (options.outputMode !== 'human') {
+    console.log(formatOutput({ id, ...route }, 'json'));
+    return;
+  }
+  console.log(`${chalk.bold(id)} is delivered to: ${describeAudience(route)}`);
 }
 
 /** Journal directory of a session, failing loudly when the session has never had events. */
@@ -125,13 +230,23 @@ async function requireEventsDir(target: string): Promise<string> {
 
 export async function tailEvents(
   target: string,
-  options: EventsAgentOptions & { follow?: boolean; all?: boolean }
+  options: EventsAgentOptions & { follow?: boolean; all?: boolean; unrouted?: boolean }
 ): Promise<void> {
   const agent = resolveAgent(options);
   const dir = await requireEventsDir(target);
   const json = options.outputMode !== 'human';
+  if (options.all && options.unrouted) {
+    throw new ClientError('Pass either --all or --unrouted, not both');
+  }
+  // Routing is re-read on every check, so a change applies to a running --follow too.
+  const read = async (): Promise<JournalRecord[]> => {
+    if (options.all) return readJournal(dir);
+    const routing = await readRouting(dir);
+    if (options.unrouted) return (await readJournal(dir)).filter((r) => isUnrouted(r, routing));
+    return readUnacked(dir, agent, (r) => isRoutedTo(r, agent, routing));
+  };
 
-  const initial = options.all ? await readJournal(dir) : await readUnacked(dir, agent);
+  const initial = await read();
   let lastSeq = initial.at(-1)?.seq ?? 0;
   if (!options.follow) {
     if (json) {
@@ -141,7 +256,11 @@ export async function tailEvents(
     if (initial.length === 0) {
       console.log(
         chalk.dim(
-          options.all ? 'The journal is empty.' : `No unacknowledged events for agent "${agent}".`
+          options.all
+            ? 'The journal is empty.'
+            : options.unrouted
+              ? 'No unrouted records.'
+              : `No unacknowledged events for agent "${agent}".`
         )
       );
       console.log(chalk.dim(`To wait for new events, run: mcpc ${target} events-tail --follow`));
@@ -167,9 +286,7 @@ export async function tailEvents(
       if (busy) return;
       busy = true;
       try {
-        const fresh = (options.all ? await readJournal(dir) : await readUnacked(dir, agent)).filter(
-          (r) => r.seq > lastSeq
-        );
+        const fresh = (await read()).filter((r) => r.seq > lastSeq);
         for (const record of fresh) print(record);
         lastSeq = fresh.at(-1)?.seq ?? lastSeq;
       } finally {
@@ -212,8 +329,10 @@ export async function ackEvents(
     return seq;
   });
   const dir = await requireEventsDir(target);
-  const acks = await ackRecords(dir, agent, options.all ? 'all' : parsed);
-  const remaining = (await readUnacked(dir, agent)).length;
+  const routing = await readRouting(dir);
+  const visible = (r: JournalRecord): boolean => isRoutedTo(r, agent, routing);
+  const acks = await ackRecords(dir, agent, options.all ? 'all' : parsed, visible);
+  const remaining = (await readUnacked(dir, agent, visible)).length;
   if (options.outputMode !== 'human') {
     console.log(formatOutput({ agent, ...acks, unacked: remaining }, 'json'));
     return;
@@ -228,13 +347,20 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
   const dir = await requireEventsDir(target);
   const { getSession } = await import('../../lib/sessions.js');
   const session = await getSession(target);
-  const [cursors, unacked] = await Promise.all([readCursors(dir), readUnacked(dir, agent)]);
+  const routing = await readRouting(dir);
+  const [cursors, unacked, journal] = await Promise.all([
+    readCursors(dir),
+    readUnacked(dir, agent, (r) => isRoutedTo(r, agent, routing)),
+    readJournal(dir),
+  ]);
+  const unrouted = journal.filter((r) => isUnrouted(r, routing)).length;
   const polled = Object.values(session?.eventSubscriptions ?? {}).map(
     (entry: EventSubscriptionEntry) => ({
       source: 'events' as const,
       ...entry,
       cursor: cursors[entry.id]?.cursor ?? null,
       cursorUpdatedAt: cursors[entry.id]?.updatedAt,
+      route: routing.subs[entry.id] ?? {},
       unacked: unacked.filter((r) => r.sub === entry.id).length,
     })
   );
@@ -247,6 +373,7 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
           name: CHANNEL_SUBSCRIPTION,
           cursor: null,
           cursorUpdatedAt: cursors[CHANNEL_SUBSCRIPTION].updatedAt,
+          route: routing.subs[CHANNEL_SUBSCRIPTION] ?? {},
           unacked: unacked.filter((r) => r.sub === CHANNEL_SUBSCRIPTION).length,
         },
       ]
@@ -256,7 +383,7 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
 
   if (options.outputMode !== 'human') {
     console.log(
-      formatOutput({ agent, unacked: unacked.length, unackedGaps, subscriptions }, 'json')
+      formatOutput({ agent, unacked: unacked.length, unackedGaps, unrouted, subscriptions }, 'json')
     );
     return;
   }
@@ -275,10 +402,15 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
     console.log(`${chalk.bold(sub.id)}  ${state}  ${chalk.dim(`${sub.unacked} unacked`)}`);
     if ('lastError' in sub && sub.lastError)
       console.log(chalk.dim(`  last error: ${sub.lastError}`));
+    console.log(chalk.dim(`  delivered to: ${describeAudience(sub.route)}`));
     if (sub.cursorUpdatedAt) console.log(chalk.dim(`  cursor advanced: ${sub.cursorUpdatedAt}`));
   }
   console.log('');
   console.log(`Agent "${agent}": ${unacked.length} unacknowledged (${unackedGaps} gaps)`);
+  if (unrouted > 0) {
+    console.log(chalk.yellow(`${unrouted} record(s) name no subscribed agent.`));
+    console.log(chalk.dim(`To see them, run: mcpc ${target} events-tail --unrouted`));
+  }
   if (unacked.length > 0) console.log(chalk.dim(`To read them, run: mcpc ${target} events-tail`));
 }
 

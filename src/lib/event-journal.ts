@@ -177,7 +177,7 @@ async function readState(dir: string): Promise<JournalState> {
 }
 
 /** Write a file durably: temp file, fsync, rename over the target, fsync the directory. */
-async function writeFileDurably(path: string, content: string, dir: string): Promise<void> {
+export async function writeFileDurably(path: string, content: string, dir: string): Promise<void> {
   const tmp = `${path}.${process.pid}.tmp`;
   const handle = await open(tmp, 'w', 0o600);
   try {
@@ -357,11 +357,18 @@ export function isAcked(acks: AgentAcks, seq: number): boolean {
   return seq <= acks.ackedThrough || acks.acked.includes(seq);
 }
 
-/** Records the agent has not acknowledged yet, in seq order. */
-export async function readUnacked(dir: string, agent: string): Promise<JournalRecord[]> {
+/** Which records an agent receives; every record when absent. */
+export type RecordFilter = (record: JournalRecord) => boolean;
+
+/** Records the agent receives and has not acknowledged yet, in seq order. */
+export async function readUnacked(
+  dir: string,
+  agent: string,
+  visible: RecordFilter = () => true
+): Promise<JournalRecord[]> {
   const [records, acks] = await Promise.all([readJournal(dir), readAcks(dir, agent)]);
   const ackedSet = new Set(acks.acked);
-  return records.filter((r) => r.seq > acks.ackedThrough && !ackedSet.has(r.seq));
+  return records.filter((r) => r.seq > acks.ackedThrough && !ackedSet.has(r.seq) && visible(r));
 }
 
 /**
@@ -372,7 +379,8 @@ export async function readUnacked(dir: string, agent: string): Promise<JournalRe
 export async function ackRecords(
   dir: string,
   agent: string,
-  seqs: number[] | 'all'
+  seqs: number[] | 'all',
+  visible: RecordFilter = () => true
 ): Promise<AgentAcks> {
   validateAgentName(agent);
   const records = await readJournal(dir);
@@ -386,7 +394,19 @@ export async function ackRecords(
           (lastSeq === 0 ? 'The journal is empty.' : `Valid seqs are 1-${lastSeq}.`)
       );
     }
+    const bySeq = new Map(records.map((r) => [r.seq, r]));
+    const foreign = seqs.filter((s) => {
+      const record = bySeq.get(s);
+      return record !== undefined && !visible(record);
+    });
+    if (foreign.length > 0) {
+      throw new ClientError(
+        `Event seq ${foreign.join(', ')} is not routed to agent "${agent}", so it cannot acknowledge it.`
+      );
+    }
   }
+  // Records the agent never receives count as acknowledged, so its watermark can advance.
+  const invisible = new Set(records.filter((r) => !visible(r)).map((r) => r.seq));
 
   const path = acksPath(dir, agent);
   await ensureDir(join(path, '..'));
@@ -401,7 +421,7 @@ export async function ackRecords(
       } else {
         for (const seq of targets) if (seq > ackedThrough) acked.add(seq);
       }
-      while (acked.has(ackedThrough + 1)) {
+      while (acked.has(ackedThrough + 1) || invisible.has(ackedThrough + 1)) {
         acked.delete(ackedThrough + 1);
         ackedThrough++;
       }

@@ -13,6 +13,7 @@ New to mcpc? Start with the [README](../README.md), or run `mcpc help --skill` f
 - [`mcpc restart`](#mcpc-restart)
 - [`mcpc login`](#mcpc-login)
 - [`mcpc logout`](#mcpc-logout)
+- [`mcpc supervise`](#mcpc-supervise)
 - [`mcpc clean`](#mcpc-clean)
 - [`mcpc grep`](#mcpc-grep)
 - [`mcpc x402`](#mcpc-x402)
@@ -46,6 +47,7 @@ New to mcpc? Start with the [README](../README.md), or run `mcpc help --skill` f
   - [`mcpc @<session> events-list`](#mcpc-session-events-list)
   - [`mcpc @<session> events-subscribe`](#mcpc-session-events-subscribe)
   - [`mcpc @<session> events-unsubscribe`](#mcpc-session-events-unsubscribe)
+  - [`mcpc @<session> events-route`](#mcpc-session-events-route)
   - [`mcpc @<session> events-tail`](#mcpc-session-events-tail)
   - [`mcpc @<session> events-ack`](#mcpc-session-events-ack)
   - [`mcpc @<session> events-status`](#mcpc-session-events-status)
@@ -67,6 +69,7 @@ Commands:
   restart <@session>             Restart a session (losing all state)
   login <server>                 Log in to a server and save an OAuth profile
   logout <server>                Delete an OAuth profile for a server
+  supervise                      Keep sessions that receive events connected
   clean [resources...]           Clean up mcpc data (sessions, profiles, logs, all)
   grep <pattern>                 Search tools and instructions across all active sessions
   x402 [subcommand] [args...]    Configure an x402 payment wallet (EXPERIMENTAL)
@@ -106,6 +109,7 @@ MCP session commands (after connecting):
   <@session> events-list
   <@session> events-subscribe <name> [arg:=val ... | <json>]
   <@session> events-unsubscribe <name>
+  <@session> events-route <name> [--add <agent>...] [--path <path>]
   <@session> events-tail [--follow] [--all] [--agent <name>]
   <@session> events-ack <seq>... | --all [--agent <name>]
   <@session> events-status [--agent <name>]
@@ -316,6 +320,36 @@ JSON output (--json):
   `{ profile, serverUrl, deleted: true, affectedSessions }`
 ```
 
+## `mcpc supervise`
+
+```text
+Usage: mcpc supervise [options]
+
+Keep sessions that receive events connected
+
+Options:
+  --once             Check and restart once, then exit
+  --interval <secs>  Seconds between checks (default: "30")
+  --install          Install as a launchd (macOS) or systemd (Linux) user service
+  --uninstall        Remove the installed service
+  --json             Output in JSON format
+
+Notes:
+  Watches every session with an active events-subscribe subscription or a
+  claude/channel listener, and restarts its bridge when it is not running; the
+  bridge resumes polling from its journaled cursor. Needed for push-only
+  sources (claude/channel), which lose whatever is sent while no bridge listens.
+  Unauthorized or expired sessions are reported, not retried. In a loop only
+  changes are printed (one line per restart or problem).
+
+Examples:
+  mcpc supervise --once
+  mcpc supervise --install
+
+JSON output (--json):
+  With --once: `[{ session, state: "healthy"|"restarted"|"needs-attention"|"error", detail? }]`; in a loop: one such object per line with `at`; with --install / --uninstall: `{ installed|uninstalled: true, service, path }`
+```
+
 ## `mcpc clean`
 
 ```text
@@ -515,6 +549,7 @@ Commands:
   events-list                           List the event types the server offers.
   events-subscribe <name> [args...]     Subscribe to an event type; events are journaled.
   events-unsubscribe <name>             Stop an event subscription, keep its journal.
+  events-route <name>                   Show or change which agents receive a subscription.
   events-tail                           Print journaled events not yet acknowledged.
   events-ack [seqs...]                  Acknowledge journaled events by seq.
   events-status                         Show event subscriptions and unacknowledged counts.
@@ -1073,7 +1108,9 @@ Usage: mcpc @<session> events-subscribe [options] <name> [args...]
 Subscribe to an event type; events are journaled.
 
 Options:
-  --json  Output in JSON format
+  --agent <name>  Deliver to this agent (default: $MCPC_AGENT, else all)
+  --route <path>  Record path naming recipients, e.g. data.meta.to
+  --json          Output in JSON format
 
 Behavior:
   The session bridge polls the event type and appends every event to a durable
@@ -1082,11 +1119,19 @@ Behavior:
   not replayed. Subscriptions resume automatically when the session restarts.
   Arguments filter or shape the events, as in tools-call (key:=value or JSON).
 
-Example:
+Agents:
+  Several agents can share one session: each agent that subscribes (--agent or
+  MCPC_AGENT) is added to the subscription's recipients, and the event is
+  journaled once. A subscription nobody named an agent for goes to every agent.
+  With --route, a record naming recipients at that path (a name or a list)
+  goes only to them; see events-route.
+
+Examples:
   mcpc @<session> events-subscribe email.received from:="*@example.com"
+  MCPC_AGENT=triage mcpc @<session> events-subscribe ticket.created --route data.assignee
 
 JSON output (--json):
-  `{ subscribed: true, id, name, arguments?, subscribedAt }`
+  `{ subscribed: true, id, name, arguments?, subscribedAt, route: { agents?, path? } }`
 ```
 
 ### `mcpc @<session> events-unsubscribe`
@@ -1097,14 +1142,44 @@ Usage: mcpc @<session> events-unsubscribe [options] <name>
 Stop an event subscription, keep its journal.
 
 Options:
-  --json  Output in JSON format
+  --agent <name>  Only remove this agent (default: $MCPC_AGENT)
+  --json          Output in JSON format
 
 Notes:
   <name> is the event name, or the subscription id shown by events-status when
-  several subscriptions share a name.
+  several subscriptions share a name. With an agent (--agent or MCPC_AGENT),
+  only that agent stops receiving it; polling stops when no agent is left.
 
 JSON output (--json):
-  `{ unsubscribed: true, id, name }`
+  `{ unsubscribed: true, id, name }` or, while other agents remain, `{ unsubscribed: true, id, agent, remainingAgents }`
+```
+
+### `mcpc @<session> events-route`
+
+```text
+Usage: mcpc @<session> events-route [options] <name>
+
+Show or change which agents receive a subscription.
+
+Options:
+  --add <agent...>     Deliver to these agents too
+  --remove <agent...>  Stop delivering to these agents
+  --path <path>        Record path naming recipients, e.g. data.meta.to
+  --clear-path         Stop routing by a recipient path
+  --json               Output in JSON format
+
+Notes:
+  Works for any subscription, including "claude/channel" (channel messages need
+  no subscribe step). No agents means every agent receives it. With a path, a
+  record naming recipients there goes only to them; one naming none of the
+  subscription's agents is "unrouted" (events-tail --unrouted), never dropped.
+  Changes apply to records not yet acknowledged.
+
+Example:
+  mcpc @<session> events-route claude/channel --add alice bob --path data.meta.to
+
+JSON output (--json):
+  `{ id, agents?, path? }`
 ```
 
 ### `mcpc @<session> events-tail`
@@ -1116,7 +1191,8 @@ Print journaled events not yet acknowledged.
 
 Options:
   -f, --follow    Keep running and print new events as they arrive
-  --all           Print every journaled record, acknowledged or not
+  --all           Print every journaled record, for any agent
+  --unrouted      Print records that name no subscribed agent
   --agent <name>  Agent whose acks to use (default: $MCPC_AGENT or "default")
   --json          Output in JSON format
 
@@ -1175,7 +1251,7 @@ Options:
 
 JSON output (--json):
   Object:
-  `{ agent, unacked, unackedGaps, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, unacked }] }`
+  `{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`
 ```
 
 ### `mcpc @<session> logging-set-level`

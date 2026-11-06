@@ -280,6 +280,9 @@ Delivery is at-least-once, so handle each `seq` idempotently and ack after actin
 Records with `"kind": "gap"` mean events may be missing (`truncated`, `no-replay`,
 `terminated`); re-read authoritative state with tools when that matters. Use
 `--agent <name>` (or `MCPC_AGENT`) to keep your acks separate from other agents.
+Sharing a session with other agents: set `MCPC_AGENT=<you>` before `events-subscribe` so you
+are a recipient, and you only see (and can only ack) records routed to you. `events-route <sub>
+--path data.meta.to` delivers addressed records to the agent they name.
 Claude Code channel messages (servers declaring `claude/channel`, 2025-11-25 sessions) land in
 the same journal as `sub: "claude/channel"` with the message in `data.content`.
 

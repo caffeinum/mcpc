@@ -24,6 +24,7 @@ import * as tools from './commands/tools.js';
 import * as resources from './commands/resources.js';
 import * as skills from './commands/skills.js';
 import * as events from './commands/events.js';
+import { DEFAULT_SUPERVISE_INTERVAL_SECS } from './commands/supervise-constants.js';
 import * as help from './commands/help.js';
 import * as prompts from './commands/prompts.js';
 import * as completion from './commands/completion.js';
@@ -473,6 +474,7 @@ ${chalk.bold('MCP session commands (after connecting):')}
   <@session> ${theme.cyan('events-list')}
   <@session> ${theme.cyan('events-subscribe')} <name> [arg:=val ... | <json>]
   <@session> ${theme.cyan('events-unsubscribe')} <name>
+  <@session> ${theme.cyan('events-route')} <name> [--add <agent>...] [--path <path>]
   <@session> ${theme.cyan('events-tail')} [--follow] [--all] [--agent <name>]
   <@session> ${theme.cyan('events-ack')} <seq>... | --all [--agent <name>]
   <@session> ${theme.cyan('events-status')} [--agent <name>]
@@ -830,6 +832,40 @@ ${jsonHelp('Interactive prompts go to stderr; stdout is a clean JSON object', '`
     });
 
   // clean command: mcpc clean [resources...]
+  program
+    .command('supervise')
+    .description('Keep sessions that receive events connected')
+    .option('--once', 'Check and restart once, then exit')
+    .option('--interval <secs>', 'Seconds between checks', String(DEFAULT_SUPERVISE_INTERVAL_SECS))
+    .option('--install', 'Install as a launchd (macOS) or systemd (Linux) user service')
+    .option('--uninstall', 'Remove the installed service')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Watches every session with an active events-subscribe subscription or a
+  claude/channel listener, and restarts its bridge when it is not running; the
+  bridge resumes polling from its journaled cursor. Needed for push-only
+  sources (claude/channel), which lose whatever is sent while no bridge listens.
+  Unauthorized or expired sessions are reported, not retried. In a loop only
+  changes are printed (one line per restart or problem).
+
+${chalk.bold('Examples:')}
+  mcpc supervise --once
+  mcpc supervise --install
+${jsonHelp('With --once: `[{ session, state: "healthy"|"restarted"|"needs-attention"|"error", detail? }]`; in a loop: one such object per line with `at`; with --install / --uninstall: `{ installed|uninstalled: true, service, path }`')}`
+    )
+    .action(async (options, command) => {
+      const { supervise } = await import('./commands/supervise.js');
+      await supervise({
+        ...(options.once && { once: true }),
+        intervalSecs: Number(options.interval),
+        ...(options.install && { install: true }),
+        ...(options.uninstall && { uninstall: true }),
+        ...getOptionsFromCommand(command),
+      });
+    });
+
   program
     .command('clean [resources...]')
     .description('Clean up mcpc data (sessions, profiles, logs, all)')
@@ -1411,6 +1447,8 @@ ${jsonHelp(
   program
     .command('events-subscribe <name> [args...]')
     .description('Subscribe to an event type; events are journaled.')
+    .option('--agent <name>', 'Deliver to this agent (default: $MCPC_AGENT, else all)')
+    .option('--route <path>', 'Record path naming recipients, e.g. data.meta.to')
     .addHelpText(
       'after',
       `
@@ -1421,34 +1459,84 @@ ${chalk.bold('Behavior:')}
   not replayed. Subscriptions resume automatically when the session restarts.
   Arguments filter or shape the events, as in tools-call (key:=value or JSON).
 
-${chalk.bold('Example:')}
+${chalk.bold('Agents:')}
+  Several agents can share one session: each agent that subscribes (--agent or
+  MCPC_AGENT) is added to the subscription's recipients, and the event is
+  journaled once. A subscription nobody named an agent for goes to every agent.
+  With --route, a record naming recipients at that path (a name or a list)
+  goes only to them; see events-route.
+
+${chalk.bold('Examples:')}
   mcpc ${session} events-subscribe email.received from:="*@example.com"
-${jsonHelp('`{ subscribed: true, id, name, arguments?, subscribedAt }`')}`
+  MCPC_AGENT=triage mcpc ${session} events-subscribe ticket.created --route data.assignee
+${jsonHelp('`{ subscribed: true, id, name, arguments?, subscribedAt, route: { agents?, path? } }`')}`
     )
-    .action(async (name, args, _options, command) => {
-      await events.subscribeEvents(session, name, { args, ...getOptionsFromCommand(command) });
+    .action(async (name, args, options, command) => {
+      await events.subscribeEvents(session, name, {
+        args,
+        ...(options.agent && { agent: options.agent }),
+        ...(options.route && { route: options.route }),
+        ...getOptionsFromCommand(command),
+      });
     });
 
   program
     .command('events-unsubscribe <name>')
     .description('Stop an event subscription, keep its journal.')
+    .option('--agent <name>', 'Only remove this agent (default: $MCPC_AGENT)')
     .addHelpText(
       'after',
       `
 ${chalk.bold('Notes:')}
   <name> is the event name, or the subscription id shown by events-status when
-  several subscriptions share a name.
-${jsonHelp('`{ unsubscribed: true, id, name }`')}`
+  several subscriptions share a name. With an agent (--agent or MCPC_AGENT),
+  only that agent stops receiving it; polling stops when no agent is left.
+${jsonHelp('`{ unsubscribed: true, id, name }` or, while other agents remain, `{ unsubscribed: true, id, agent, remainingAgents }`')}`
     )
-    .action(async (name, _options, command) => {
-      await events.unsubscribeEvents(session, name, getOptionsFromCommand(command));
+    .action(async (name, options, command) => {
+      await events.unsubscribeEvents(session, name, {
+        ...(options.agent && { agent: options.agent }),
+        ...getOptionsFromCommand(command),
+      });
+    });
+
+  program
+    .command('events-route <name>')
+    .description('Show or change which agents receive a subscription.')
+    .option('--add <agent...>', 'Deliver to these agents too')
+    .option('--remove <agent...>', 'Stop delivering to these agents')
+    .option('--path <path>', 'Record path naming recipients, e.g. data.meta.to')
+    .option('--clear-path', 'Stop routing by a recipient path')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Works for any subscription, including "claude/channel" (channel messages need
+  no subscribe step). No agents means every agent receives it. With a path, a
+  record naming recipients there goes only to them; one naming none of the
+  subscription's agents is "unrouted" (events-tail --unrouted), never dropped.
+  Changes apply to records not yet acknowledged.
+
+${chalk.bold('Example:')}
+  mcpc ${session} events-route claude/channel --add alice bob --path data.meta.to
+${jsonHelp('`{ id, agents?, path? }`')}`
+    )
+    .action(async (name, options, command) => {
+      await events.routeEvents(session, name, {
+        ...(options.add && { add: options.add }),
+        ...(options.remove && { remove: options.remove }),
+        ...(options.path && { path: options.path }),
+        ...(options.clearPath && { clearPath: true }),
+        ...getOptionsFromCommand(command),
+      });
     });
 
   program
     .command('events-tail')
     .description('Print journaled events not yet acknowledged.')
     .option('-f, --follow', 'Keep running and print new events as they arrive')
-    .option('--all', 'Print every journaled record, acknowledged or not')
+    .option('--all', 'Print every journaled record, for any agent')
+    .option('--unrouted', 'Print records that name no subscribed agent')
     .option(agentOption, agentHelp)
     .addHelpText(
       'after',
@@ -1472,6 +1560,7 @@ ${jsonHelp('Array of journal records (with --follow: one record per line)', even
       await events.tailEvents(session, {
         ...(options.follow && { follow: true }),
         ...(options.all && { all: true }),
+        ...(options.unrouted && { unrouted: true }),
         ...(options.agent && { agent: options.agent }),
         ...getOptionsFromCommand(command),
       });
@@ -1509,7 +1598,7 @@ ${jsonHelp('`{ agent, ackedThrough, acked: [seq, ...], unacked }`')}`
       'after',
       jsonHelp(
         'Object',
-        '`{ agent, unacked, unackedGaps, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, unacked }] }`'
+        '`{ agent, unacked, unackedGaps, unrouted, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, route: { agents?, path? }, unacked }] }`'
       )
     )
     .action(async (options, command) => {

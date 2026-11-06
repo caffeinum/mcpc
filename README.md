@@ -151,6 +151,7 @@ Commands:
   restart <@session>             Restart a session (losing all state)
   login <server>                 Log in to a server and save an OAuth profile
   logout <server>                Delete an OAuth profile for a server
+  supervise                      Keep sessions that receive events connected
   clean [resources...]           Clean up mcpc data (sessions, profiles, logs, all)
   grep <pattern>                 Search tools and instructions across all active sessions
   x402 [subcommand] [args...]    Configure an x402 payment wallet (EXPERIMENTAL)
@@ -190,6 +191,7 @@ MCP session commands (after connecting):
   <@session> events-list
   <@session> events-subscribe <name> [arg:=val ... | <json>]
   <@session> events-unsubscribe <name>
+  <@session> events-route <name> [--add <agent>...] [--path <path>]
   <@session> events-tail [--follow] [--all] [--agent <name>]
   <@session> events-ack <seq>... | --all [--agent <name>]
   <@session> events-status [--agent <name>]
@@ -1225,6 +1227,22 @@ Loss the client cannot prevent is recorded as a `gap` record in the journal, nev
 silently: the server resuming past our cursor (`truncated`), an event type without replay
 restarting, or the server ending the subscription. Acknowledgements are kept per agent
 (`--agent <name>` or `MCPC_AGENT`), so several agents can consume one session's events.
+
+Several agents can share one session: each record is journaled once and routed per agent.
+An agent that subscribes (`--agent`, or `MCPC_AGENT`) becomes a recipient of the subscription,
+and `--route` sends addressed records only to the agents they name:
+
+```bash
+MCPC_AGENT=alice mcpc @app events-subscribe ticket.created --route data.assignee
+MCPC_AGENT=bob   mcpc @app events-subscribe ticket.created
+MCPC_AGENT=bob   mcpc @app events-tail          # bob's tickets plus unassigned ones
+mcpc @app events-route claude/channel --add alice bob --path data.meta.to
+mcpc @app events-tail --unrouted                # addressed to nobody subscribed
+```
+
+A crashed bridge is restarted on the next command for its session. To keep event sessions
+listening without that, run `mcpc supervise` (or install it as a service with
+`mcpc supervise --install`, launchd on macOS, systemd on Linux).
 
 Servers that declare the `claude/channel` capability ([Claude Code channels](https://code.claude.com/docs/en/channels))
 push messages without ids or replay. On MCP `2025-11-25` sessions `mcpc` journals each one under

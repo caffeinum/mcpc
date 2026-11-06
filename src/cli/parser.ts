@@ -143,6 +143,7 @@ export const KNOWN_COMMANDS = [
   'close',
   'restart',
   'clean',
+  'supervise',
   'grep',
   'x402',
 ];
@@ -167,6 +168,7 @@ export const KNOWN_SESSION_COMMANDS = [
   'events-list',
   'events-subscribe',
   'events-unsubscribe',
+  'events-route',
   'events-tail',
   'events-ack',
   'events-status',
