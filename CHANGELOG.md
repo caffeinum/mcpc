@@ -9,6 +9,12 @@ Each version opens with a one-line summary, which also opens its GitHub release.
 
 ## [Unreleased]
 
+Durable server events: subscribe to the draft MCP Events extension and consume every event at least once.
+
+### Added
+
+- Support for the draft MCP [Events extension](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415) (`io.modelcontextprotocol/events`) on MCP 2026-07-28 servers: `events-list`, `events-subscribe` and `events-unsubscribe` manage subscriptions that the session bridge polls into a crash-safe journal, and `events-tail` / `events-ack` / `events-status` consume it at least once per agent, with any server-side loss recorded as a gap.
+
 ## [0.8.0] - 2026-11-04
 
 Argument completions for prompts and resource templates, tasks on MCP 2026-07-28 servers, MCP TypeScript SDK 2.3.1, stdio server secrets kept out of plaintext files, logs and `ps`, and no more duplicate bridges on Windows.

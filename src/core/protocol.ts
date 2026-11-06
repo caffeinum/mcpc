@@ -9,7 +9,7 @@
  * against drift on SDK upgrades.
  */
 
-import { SKILLS_EXTENSION_KEY, TASKS_EXTENSION_KEY } from './extensions.js';
+import { EVENTS_EXTENSION_KEY, SKILLS_EXTENSION_KEY, TASKS_EXTENSION_KEY } from './extensions.js';
 
 /** Modern-era protocol revisions (2026-07-28 and later), newest first. */
 export const MODERN_PROTOCOL_VERSIONS: readonly string[] = ['2026-07-28'];
@@ -128,6 +128,24 @@ export function discoverUnavailableMessage(protocolVersion?: string, sessionName
     `${MODERN_PROTOCOL_VERSIONS[0]}, and this connection negotiated ` +
     `${protocolVersion ?? 'an older version'}, where the initialize handshake carries the same ` +
     `information. Run "mcpc ${session}" to see it, or "mcpc ${session} ping" to check liveness`
+  );
+}
+
+export function eventsUnavailableMessage(protocolVersion?: string, sessionName?: string): string {
+  const session = sessionName ?? '@session';
+  return (
+    `Events are not available on this connection: the ${EVENTS_EXTENSION_KEY} extension is ` +
+    `specified against MCP ${MODERN_PROTOCOL_VERSIONS[0]} and later, and this connection ` +
+    `negotiated ${protocolVersion ?? 'an older version'}. Run "mcpc ${session}" to see what ` +
+    `this server supports`
+  );
+}
+
+export function eventsNotDeclaredMessage(sessionName?: string): string {
+  const session = sessionName ?? '@session';
+  return (
+    `This server does not declare the ${EVENTS_EXTENSION_KEY} extension, so it offers no ` +
+    `events. Run "mcpc ${session}" to see what it supports`
   );
 }
 

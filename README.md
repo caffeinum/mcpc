@@ -187,6 +187,12 @@ MCP session commands (after connecting):
   <@session> resources-directory-read <uri>
   <@session> skills-list
   <@session> skills-get <skill> [file] [--raw]
+  <@session> events-list
+  <@session> events-subscribe <name> [arg:=val ... | <json>]
+  <@session> events-unsubscribe <name>
+  <@session> events-tail [--follow] [--all] [--agent <name>]
+  <@session> events-ack <seq>... | --all [--agent <name>]
+  <@session> events-status [--agent <name>]
   <@session> logging-set-level <level>
   <@session> ping
   <@session> server-discover
@@ -1012,6 +1018,7 @@ client and server capabilities. Where `mcpc` stands on the
 | [Skills](https://modelcontextprotocol.io/extensions/skills/overview)                                           | `io.modelcontextprotocol/skills`                           | ✅ [`skills-list`, `skills-get`, `resources-directory-read`](#skills) (MCP 2026-07-28 servers) |
 | [MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)                                           | `io.modelcontextprotocol/ui`                               | ❌ Interactive HTML interfaces have no equivalent on a terminal                |
 | [Tasks](https://modelcontextprotocol.io/extensions/tasks/overview)                                             | `io.modelcontextprotocol/tasks`                            | ✅ [`tools-call --task/--detach`, `tasks-get`, `tasks-result`, `tasks-cancel`, `tasks-list`](#async-tasks) (MCP 2026-07-28 servers) |
+| [Events](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415) (Draft)                       | `io.modelcontextprotocol/events`                           | ✅ [`events-subscribe`, `events-tail`, `events-ack`](#events) (MCP 2026-07-28 servers, poll delivery) |
 
 The two auth extensions and tasks are the ones a client declares: `mcpc` declares all three to
 every server it connects to, so a server can tell what this client can do before any token is
@@ -1194,6 +1201,30 @@ mcpc @apify completion-complete resource 'file:///{path}' path:=/ho
 
 Servers return at most 100 suggestions ranked by relevance; `hasMore` in the `--json` output says
 whether there were more. Completion works the same on `2025-11-25` and `2026-07-28` servers.
+
+### Events
+
+Implements poll delivery of the draft [MCP Events extension](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415)
+(`io.modelcontextprotocol/events`, SEP-3415), which requires MCP `2026-07-28` or later.
+
+The session bridge polls each subscribed event type and appends every event to a durable journal
+under `~/.mcpc/events/<session>/` before it advances the subscription's cursor, so events survive
+bridge crashes and restarts and are never journaled twice. Consumers read the journal with
+`events-tail`, which redelivers an event until it is acknowledged, and works while the bridge is down:
+
+```bash
+mcpc @app events-list                                   # event types the server offers
+mcpc @app events-subscribe email.received from:="*@example.com"
+mcpc @app events-tail                                   # unacknowledged events, by seq
+mcpc --json @app events-tail --follow                   # stream new events as NDJSON
+mcpc @app events-ack 1 2 3                              # or: events-ack --all
+mcpc @app events-status                                 # subscriptions, cursors, backlog
+```
+
+Loss the client cannot prevent is recorded as a `gap` record in the journal, never skipped
+silently: the server resuming past our cursor (`truncated`), an event type without replay
+restarting, or the server ending the subscription. Acknowledgements are kept per agent
+(`--agent <name>` or `MCPC_AGENT`), so several agents can consume one session's events.
 
 ### Skills
 

@@ -43,6 +43,12 @@ New to mcpc? Start with the [README](../README.md), or run `mcpc help --skill` f
   - [`mcpc @<session> resources-directory-read`](#mcpc-session-resources-directory-read)
   - [`mcpc @<session> skills-list`](#mcpc-session-skills-list)
   - [`mcpc @<session> skills-get`](#mcpc-session-skills-get)
+  - [`mcpc @<session> events-list`](#mcpc-session-events-list)
+  - [`mcpc @<session> events-subscribe`](#mcpc-session-events-subscribe)
+  - [`mcpc @<session> events-unsubscribe`](#mcpc-session-events-unsubscribe)
+  - [`mcpc @<session> events-tail`](#mcpc-session-events-tail)
+  - [`mcpc @<session> events-ack`](#mcpc-session-events-ack)
+  - [`mcpc @<session> events-status`](#mcpc-session-events-status)
   - [`mcpc @<session> logging-set-level`](#mcpc-session-logging-set-level)
   - [`mcpc @<session> ping`](#mcpc-session-ping)
   - [`mcpc @<session> server-discover`](#mcpc-session-server-discover)
@@ -97,6 +103,12 @@ MCP session commands (after connecting):
   <@session> resources-directory-read <uri>
   <@session> skills-list
   <@session> skills-get <skill> [file] [--raw]
+  <@session> events-list
+  <@session> events-subscribe <name> [arg:=val ... | <json>]
+  <@session> events-unsubscribe <name>
+  <@session> events-tail [--follow] [--all] [--agent <name>]
+  <@session> events-ack <seq>... | --all [--agent <name>]
+  <@session> events-status [--agent <name>]
   <@session> logging-set-level <level>
   <@session> ping
   <@session> server-discover
@@ -500,6 +512,12 @@ Commands:
   resources-subscribe <uri> <file>      Subscribe to an MCP resource and sync it to a local file.
   resources-unsubscribe <uri>           Stop syncing a resource, keep the local file.
   resources-templates-list              List MCP resource templates.
+  events-list                           List the event types the server offers.
+  events-subscribe <name> [args...]     Subscribe to an event type; events are journaled.
+  events-unsubscribe <name>             Stop an event subscription, keep its journal.
+  events-tail                           Print journaled events not yet acknowledged.
+  events-ack [seqs...]                  Acknowledge journaled events by seq.
+  events-status                         Show event subscriptions and unacknowledged counts.
   skills-list                           List the agent skills the server serves.
   skills-get <skill> [file]             Read a skill's SKILL.md, or one of its files (see below).
   resources-directory-read <uri>        List a directory resource's direct children.
@@ -1025,6 +1043,137 @@ JSON output (--json):
   The skill entry plus the content that was read:
   `{ skill: { uri, frontmatter, resources }, contents: [{ uri, mimeType?, text? | blob? }] }`
   Schema: https://github.com/modelcontextprotocol/ext-skills/blob/main/specification/beta/skills.mdx
+```
+
+### `mcpc @<session> events-list`
+
+```text
+Usage: mcpc @<session> events-list [options]
+
+List the event types the server offers.
+
+Options:
+  --json  Output in JSON format
+
+Notes:
+  Requires an MCP 2026-07-28 connection to a server that declares the
+  io.modelcontextprotocol/events extension (a Draft, SEP-3415).
+
+JSON output (--json):
+  Array of event descriptors:
+  `[{ name, description?, delivery: ["poll"|"push"|"webhook", ...], inputSchema?, payloadSchema? }, ...]`
+  Schema: https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415
+```
+
+### `mcpc @<session> events-subscribe`
+
+```text
+Usage: mcpc @<session> events-subscribe [options] <name> [args...]
+
+Subscribe to an event type; events are journaled.
+
+Options:
+  --json  Output in JSON format
+
+Behavior:
+  The session bridge polls the event type and appends every event to a durable
+  journal (~/.mcpc/events/<session>/) before advancing its cursor, so events
+  survive bridge crashes and restarts. Delivery starts now: earlier events are
+  not replayed. Subscriptions resume automatically when the session restarts.
+  Arguments filter or shape the events, as in tools-call (key:=value or JSON).
+
+Example:
+  mcpc @<session> events-subscribe email.received from:="*@example.com"
+
+JSON output (--json):
+  `{ subscribed: true, id, name, arguments?, subscribedAt }`
+```
+
+### `mcpc @<session> events-unsubscribe`
+
+```text
+Usage: mcpc @<session> events-unsubscribe [options] <name>
+
+Stop an event subscription, keep its journal.
+
+Options:
+  --json  Output in JSON format
+
+Notes:
+  <name> is the event name, or the subscription id shown by events-status when
+  several subscriptions share a name.
+
+JSON output (--json):
+  `{ unsubscribed: true, id, name }`
+```
+
+### `mcpc @<session> events-tail`
+
+```text
+Usage: mcpc @<session> events-tail [options]
+
+Print journaled events not yet acknowledged.
+
+Options:
+  -f, --follow    Keep running and print new events as they arrive
+  --all           Print every journaled record, acknowledged or not
+  --agent <name>  Agent whose acks to use (default: $MCPC_AGENT or "default")
+  --json          Output in JSON format
+
+Notes:
+  Delivery is at-least-once: an event is printed again on every run until it
+  is acknowledged with events-ack, so consumers should be idempotent by seq.
+  Gap records mark events that could not be delivered (the server skipped past
+  our cursor, an event type without replay restarted, or the server ended the
+  subscription). Works while the session bridge is down. Each agent has its
+  own acknowledgements, selected with --agent or MCPC_AGENT.
+
+Examples:
+  mcpc @<session> events-tail
+  mcpc @<session> events-tail --follow --json | while read -r e; do ...; done
+
+JSON output (--json):
+  Array of journal records (with --follow: one record per line):
+  `{ seq, kind: "event", sub, name, eventId, timestamp, receivedAt, data, _meta? }` or `{ seq, kind: "gap", sub, name, reason: "truncated"|"no-replay"|"terminated", detail?, receivedAt }`
+```
+
+### `mcpc @<session> events-ack`
+
+```text
+Usage: mcpc @<session> events-ack [options] [seqs...]
+
+Acknowledge journaled events by seq.
+
+Options:
+  --all           Acknowledge every journaled record
+  --agent <name>  Agent whose acks to use (default: $MCPC_AGENT or "default")
+  --json          Output in JSON format
+
+Notes:
+  Acknowledging is idempotent; an unknown seq fails without changing anything.
+
+Examples:
+  mcpc @<session> events-ack 3 4 5
+  mcpc @<session> events-ack --all --agent reviewer
+
+JSON output (--json):
+  `{ agent, ackedThrough, acked: [seq, ...], unacked }`
+```
+
+### `mcpc @<session> events-status`
+
+```text
+Usage: mcpc @<session> events-status [options]
+
+Show event subscriptions and unacknowledged counts.
+
+Options:
+  --agent <name>  Agent whose acks to use (default: $MCPC_AGENT or "default")
+  --json          Output in JSON format
+
+JSON output (--json):
+  Object:
+  `{ agent, unacked, unackedGaps, subscriptions: [{ id, name, arguments?, subscribedAt, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, unacked }] }`
 ```
 
 ### `mcpc @<session> logging-set-level`

@@ -125,8 +125,9 @@ export function createStreamableHttpTransport(
 
   // Explicitly pass proxy-aware fetch so the MCP SDK transport respects
   // HTTP_PROXY/HTTPS_PROXY env vars (its internal fetch ignores the global dispatcher).
-  // Custom fetch (e.g. x402 middleware) takes priority if provided.
-  const fetchFn = options.fetch ?? proxyFetch;
+  // Custom fetch (e.g. x402 middleware) takes priority if provided. Either way, events
+  // requests get their Mcp-Name routing header on top.
+  const fetchFn = withEventsNameHeader(options.fetch ?? proxyFetch);
 
   const transport = new StreamableHTTPClientTransport(new URL(url), {
     reconnectionOptions: defaultReconnectionOptions,
@@ -249,4 +250,52 @@ export function createTransportFromConfig(
   }
 
   throw new ClientError('Invalid ServerConfig: must have either url or command');
+}
+
+/** `events/*` methods whose `params.name` the `Mcp-Name` routing header must mirror (SEP-3415). */
+const EVENTS_NAME_HEADER_METHODS = new Set([
+  'events/poll',
+  'events/stream',
+  'events/subscribe',
+  'events/unsubscribe',
+]);
+
+/**
+ * Set the `Mcp-Name` header on `events/*` requests. The SDK sets it only for the core
+ * methods it knows (`tools/call`, `prompts/get`, ...), and a server rejects an events
+ * request without it (`HeaderMismatch`). Remove once the SDK's header table covers events.
+ */
+export function withEventsNameHeader(baseFetch: FetchLike): FetchLike {
+  return (url, init) => {
+    const name = eventNameOf(init?.body);
+    if (name === undefined) return baseFetch(url, init);
+    const headers = new Headers(init?.headers);
+    headers.set('Mcp-Name', encodeMcpHeaderValue(name));
+    return baseFetch(url, { ...init, headers });
+  };
+}
+
+function eventNameOf(body: unknown): string | undefined {
+  if (typeof body !== 'string' || !body.includes('"events/')) return undefined;
+  try {
+    const message = JSON.parse(body) as { method?: unknown; params?: { name?: unknown } };
+    if (typeof message.method !== 'string' || !EVENTS_NAME_HEADER_METHODS.has(message.method)) {
+      return undefined;
+    }
+    return typeof message.params?.name === 'string' ? message.params.name : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Plain value when it is a safe ASCII header value, else the spec's Base64 sentinel form. */
+export function encodeMcpHeaderValue(value: string): string {
+  const prefix = '=?base64?';
+  const suffix = '?=';
+  const safe =
+    value.length > 0 &&
+    value === value.trim() &&
+    !(value.startsWith(prefix) && value.endsWith(suffix)) &&
+    [...value].every((ch) => ch === '\t' || (ch >= ' ' && ch <= '~'));
+  return safe ? value : `${prefix}${Buffer.from(value, 'utf-8').toString('base64')}${suffix}`;
 }

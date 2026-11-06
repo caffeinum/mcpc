@@ -23,6 +23,7 @@ import {
 import * as tools from './commands/tools.js';
 import * as resources from './commands/resources.js';
 import * as skills from './commands/skills.js';
+import * as events from './commands/events.js';
 import * as help from './commands/help.js';
 import * as prompts from './commands/prompts.js';
 import * as completion from './commands/completion.js';
@@ -469,6 +470,12 @@ ${chalk.bold('MCP session commands (after connecting):')}
   <@session> ${theme.cyan('resources-directory-read')} <uri>
   <@session> ${theme.cyan('skills-list')}
   <@session> ${theme.cyan('skills-get')} <skill> [file] [--raw]
+  <@session> ${theme.cyan('events-list')}
+  <@session> ${theme.cyan('events-subscribe')} <name> [arg:=val ... | <json>]
+  <@session> ${theme.cyan('events-unsubscribe')} <name>
+  <@session> ${theme.cyan('events-tail')} [--follow] [--all] [--agent <name>]
+  <@session> ${theme.cyan('events-ack')} <seq>... | --all [--agent <name>]
+  <@session> ${theme.cyan('events-status')} [--agent <name>]
   <@session> ${theme.cyan('logging-set-level')} <level>
   <@session> ${theme.cyan('ping')}
   <@session> ${theme.cyan('server-discover')}
@@ -1373,6 +1380,141 @@ ${jsonHelp('`{ subscribed: true, uri, file, bytes, mimeType? }`')}`
     )
     .action(async (_options, command) => {
       await resources.listResourceTemplates(session, getOptionsFromCommand(command));
+    });
+
+  // Events commands (MCP extension: io.modelcontextprotocol/events, SEP-3415 Draft)
+  const agentOption = '--agent <name>';
+  const agentHelp = 'Agent whose acks to use (default: $MCPC_AGENT or "default")';
+  const eventRecordShape =
+    '`{ seq, kind: "event", sub, name, eventId, timestamp, receivedAt, data, _meta? }` or ' +
+    '`{ seq, kind: "gap", sub, name, reason: "truncated"|"no-replay"|"terminated", detail?, receivedAt }`';
+
+  program
+    .command('events-list')
+    .description('List the event types the server offers.')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Requires an MCP 2026-07-28 connection to a server that declares the
+  io.modelcontextprotocol/events extension (a Draft, SEP-3415).
+${jsonHelp(
+  'Array of event descriptors',
+  '`[{ name, description?, delivery: ["poll"|"push"|"webhook", ...], inputSchema?, payloadSchema? }, ...]`',
+  events.EVENTS_SPEC_URL
+)}`
+    )
+    .action(async (_options, command) => {
+      await events.listEvents(session, getOptionsFromCommand(command));
+    });
+
+  program
+    .command('events-subscribe <name> [args...]')
+    .description('Subscribe to an event type; events are journaled.')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Behavior:')}
+  The session bridge polls the event type and appends every event to a durable
+  journal (~/.mcpc/events/<session>/) before advancing its cursor, so events
+  survive bridge crashes and restarts. Delivery starts now: earlier events are
+  not replayed. Subscriptions resume automatically when the session restarts.
+  Arguments filter or shape the events, as in tools-call (key:=value or JSON).
+
+${chalk.bold('Example:')}
+  mcpc ${session} events-subscribe email.received from:="*@example.com"
+${jsonHelp('`{ subscribed: true, id, name, arguments?, subscribedAt }`')}`
+    )
+    .action(async (name, args, _options, command) => {
+      await events.subscribeEvents(session, name, { args, ...getOptionsFromCommand(command) });
+    });
+
+  program
+    .command('events-unsubscribe <name>')
+    .description('Stop an event subscription, keep its journal.')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  <name> is the event name, or the subscription id shown by events-status when
+  several subscriptions share a name.
+${jsonHelp('`{ unsubscribed: true, id, name }`')}`
+    )
+    .action(async (name, _options, command) => {
+      await events.unsubscribeEvents(session, name, getOptionsFromCommand(command));
+    });
+
+  program
+    .command('events-tail')
+    .description('Print journaled events not yet acknowledged.')
+    .option('-f, --follow', 'Keep running and print new events as they arrive')
+    .option('--all', 'Print every journaled record, acknowledged or not')
+    .option(agentOption, agentHelp)
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Delivery is at-least-once: an event is printed again on every run until it
+  is acknowledged with events-ack, so consumers should be idempotent by seq.
+  Gap records mark events that could not be delivered (the server skipped past
+  our cursor, an event type without replay restarted, or the server ended the
+  subscription). Works while the session bridge is down. Each agent has its
+  own acknowledgements, selected with --agent or MCPC_AGENT.
+
+${chalk.bold('Examples:')}
+  mcpc ${session} events-tail
+  mcpc ${session} events-tail --follow --json | while read -r e; do ...; done
+${jsonHelp('Array of journal records (with --follow: one record per line)', eventRecordShape)}`
+    )
+    .action(async (options, command) => {
+      await events.tailEvents(session, {
+        ...(options.follow && { follow: true }),
+        ...(options.all && { all: true }),
+        ...(options.agent && { agent: options.agent }),
+        ...getOptionsFromCommand(command),
+      });
+    });
+
+  program
+    .command('events-ack [seqs...]')
+    .description('Acknowledge journaled events by seq.')
+    .option('--all', 'Acknowledge every journaled record')
+    .option(agentOption, agentHelp)
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Acknowledging is idempotent; an unknown seq fails without changing anything.
+
+${chalk.bold('Examples:')}
+  mcpc ${session} events-ack 3 4 5
+  mcpc ${session} events-ack --all --agent reviewer
+${jsonHelp('`{ agent, ackedThrough, acked: [seq, ...], unacked }`')}`
+    )
+    .action(async (seqs, options, command) => {
+      await events.ackEvents(session, seqs, {
+        ...(options.all && { all: true }),
+        ...(options.agent && { agent: options.agent }),
+        ...getOptionsFromCommand(command),
+      });
+    });
+
+  program
+    .command('events-status')
+    .description('Show event subscriptions and unacknowledged counts.')
+    .option(agentOption, agentHelp)
+    .addHelpText(
+      'after',
+      jsonHelp(
+        'Object',
+        '`{ agent, unacked, unackedGaps, subscriptions: [{ id, name, arguments?, subscribedAt, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, unacked }] }`'
+      )
+    )
+    .action(async (options, command) => {
+      await events.eventsStatus(session, {
+        ...(options.agent && { agent: options.agent }),
+        ...getOptionsFromCommand(command),
+      });
     });
 
   // Skills commands (MCP extension: io.modelcontextprotocol/skills)

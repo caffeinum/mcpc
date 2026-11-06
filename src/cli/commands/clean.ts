@@ -166,7 +166,10 @@ async function cleanAll(): Promise<CleanResult> {
   // getSocketPath() may relocate over-long socket paths here (under the temp dir).
   const shortSocketDir = getShortSocketDir();
 
-  for (const dir of [bridgesDir, shortSocketDir, logsDir]) {
+  // Event journals (events-subscribe) belong to sessions, which are all gone by now
+  const eventsDir = join(mcpcHome, 'events');
+
+  for (const dir of [bridgesDir, shortSocketDir, logsDir, eventsDir]) {
     if (await fileExists(dir)) {
       try {
         await rm(dir, { recursive: true, force: true });

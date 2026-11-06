@@ -34,7 +34,9 @@ import type {
   ListSkillsResult,
   GetSkillResult,
   ReadResourceDirectoryResult,
+  EventSubscriptionEntry,
 } from './types.js';
+import type { EventDescriptor } from '../core/events-schema.js';
 import type { ListResourceTemplatesResult } from '@modelcontextprotocol/client';
 import { BridgeClient } from './bridge-client.js';
 import { ensureBridgeReady, restartBridge } from './bridge-manager.js';
@@ -294,6 +296,50 @@ export class SessionClient implements IMcpClient {
           this.requestTimeoutSecs
         ) as Promise<ReadResourceDirectoryResult>,
       'readResourceDirectory'
+    );
+  }
+
+  /** List the event types the server offers (events extension, all pages). */
+  async listEvents(): Promise<EventDescriptor[]> {
+    return this.withRetry(
+      () =>
+        this.bridgeClient.request('listEvents', undefined, this.requestTimeoutSecs) as Promise<
+          EventDescriptor[]
+        >,
+      'listEvents'
+    );
+  }
+
+  /**
+   * Subscribe to an event type; the bridge polls it into the session's event journal.
+   * Idempotent: subscribing again with the same name and arguments returns the
+   * existing subscription.
+   */
+  async subscribeEvents(
+    name: string,
+    args: Record<string, unknown> | undefined
+  ): Promise<EventSubscriptionEntry> {
+    return this.withRetry(
+      () =>
+        this.bridgeClient.request(
+          'subscribeEvents',
+          { name, ...(args && { arguments: args }) },
+          this.requestTimeoutSecs
+        ) as Promise<EventSubscriptionEntry>,
+      'subscribeEvents'
+    );
+  }
+
+  /** Stop polling a subscription (by id or unambiguous name). Journaled events are kept. */
+  async unsubscribeEvents(id: string): Promise<EventSubscriptionEntry> {
+    return this.withRetry(
+      () =>
+        this.bridgeClient.request(
+          'unsubscribeEvents',
+          { id },
+          this.requestTimeoutSecs
+        ) as Promise<EventSubscriptionEntry>,
+      'unsubscribeEvents'
     );
   }
 

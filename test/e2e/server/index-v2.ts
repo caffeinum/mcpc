@@ -17,6 +17,13 @@
  *     stateless - serve 2025-era requests statelessly (no session IDs)
  *   NO_TASKS    - withhold the io.modelcontextprotocol/tasks extension, so
  *                 --task/--detach must refuse and slow-task runs synchronously
+ *   WITH_EVENTS - declare the io.modelcontextprotocol/events extension (SEP-3415)
+ *                 and serve events/list + events/poll for `test.durable`
+ *
+ * Events control endpoints (WITH_EVENTS): POST emit-events?count=N[&tag=x],
+ * truncate-next-poll, rewind-next-poll?by=N (replays delivered events, to prove
+ * dedupe), forbid-events (polls answer Forbidden from now on); GET
+ * get-emitted-events (ground truth) and get-events-routing (Mcp-Name headers seen).
  *
  * Tasks: this server declares the 2026-07-28 tasks extension and answers a
  * `slow-task` call from a declaring client with a task handle
@@ -81,6 +88,7 @@ const NO_TASKS = process.env.NO_TASKS === 'true';
 const NO_COMPLETIONS = process.env.NO_COMPLETIONS === 'true';
 const WITH_SKILLS = process.env.WITH_SKILLS === 'true';
 const WITH_OTHER_EXTENSIONS = process.env.WITH_OTHER_EXTENSIONS === 'true';
+const WITH_EVENTS = process.env.WITH_EVENTS === 'true';
 const SKILLS_TAMPER = process.env.SKILLS_TAMPER;
 const WITH_OAUTH = process.env.WITH_OAUTH === 'true';
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || 'test-client';
@@ -98,6 +106,30 @@ let lastClientCapabilities: unknown = null;
 
 // Mutable counter resource state (bumped via /control/bump-counter)
 let counterValue = 0;
+
+// ---------------------------------------------------------------------------
+// Events extension (io.modelcontextprotocol/events, SEP-3415 Draft)
+// ---------------------------------------------------------------------------
+
+const EVENTS_EXTENSION_KEY = 'io.modelcontextprotocol/events';
+const EVENTS_NOT_FOUND = -32023;
+const EVENTS_FORBIDDEN = -32024;
+const EVENTS_POLL_INTERVAL_MS = 200;
+const EVENTS_DEFAULT_MAX = 50;
+
+/** A durable outbox: the cursor is the seq of the last event the client has seen. */
+interface OutboxEvent {
+  seq: number;
+  eventId: string;
+  name: string;
+  timestamp: string;
+  data: { n: number; tag?: string };
+}
+const eventOutbox: OutboxEvent[] = [];
+let truncateNextPoll = false;
+let rewindNextPollBy = 0;
+let eventsForbidden = false;
+const eventsRoutingLog: Array<{ method: string; mcpName: string | null }> = [];
 
 // ---------------------------------------------------------------------------
 // Tasks extension (io.modelcontextprotocol/tasks, MCP 2026-07-28)
@@ -356,6 +388,13 @@ function createTestServer(ctx?: McpRequestContext): Server {
     };
   }
 
+  if (WITH_EVENTS) {
+    capabilities.extensions = {
+      ...((capabilities.extensions as Record<string, unknown>) || {}),
+      [EVENTS_EXTENSION_KEY]: {},
+    };
+  }
+
   // Extensions beyond the ones mcpc implements. A server declares what it serves on its
   // own terms, so the client has to name these without offering commands for them.
   if (WITH_OTHER_EXTENSIONS) {
@@ -593,6 +632,93 @@ function createTestServer(ctx?: McpRequestContext): Server {
     }
   }
 
+  if (WITH_EVENTS) {
+    server.setRequestHandler(
+      'events/list',
+      { params: passthroughSchema<{ cursor?: string }>() },
+      async () => ({
+        events: [
+          {
+            name: 'test.durable',
+            description: 'Emitted on POST /control/emit-events; replayable from a cursor',
+            delivery: ['poll'],
+            inputSchema: { type: 'object', properties: { tag: { type: 'string' } } },
+            payloadSchema: { type: 'object', properties: { n: { type: 'number' } } },
+          },
+        ],
+      })
+    );
+
+    server.setRequestHandler(
+      'events/poll',
+      {
+        params: passthroughSchema<{
+          name: string;
+          arguments?: { tag?: string };
+          cursor?: string | null;
+          maxEvents?: number;
+        }>(),
+      },
+      async (params) => {
+        eventsRoutingLog.push({
+          method: 'events/poll',
+          mcpName: ctx?.requestInfo?.headers.get('mcp-name') ?? null,
+        });
+        if (eventsRoutingLog.length > 50) eventsRoutingLog.shift();
+        await maybeDelay();
+        if (shouldFail()) {
+          throw new Error('Simulated failure');
+        }
+        if (params.name !== 'test.durable') {
+          throw new ProtocolError(EVENTS_NOT_FOUND, 'NotFound', { kind: 'event' });
+        }
+        if (eventsForbidden) {
+          throw new ProtocolError(EVENTS_FORBIDDEN, 'Forbidden', { reason: 'Access revoked' });
+        }
+        const head = eventOutbox.length > 0 ? eventOutbox[eventOutbox.length - 1]!.seq : 0;
+        const pollEnvelope = { resultType: 'complete', nextPollMs: EVENTS_POLL_INTERVAL_MS };
+        if (params.cursor === null || params.cursor === undefined) {
+          return {
+            ...pollEnvelope,
+            events: [],
+            cursor: String(head),
+            truncated: false,
+            hasMore: false,
+          };
+        }
+        if (truncateNextPoll) {
+          truncateNextPoll = false;
+          return {
+            ...pollEnvelope,
+            events: [],
+            cursor: String(head),
+            truncated: true,
+            hasMore: false,
+          };
+        }
+        let from = Number(params.cursor);
+        if (rewindNextPollBy > 0) {
+          from = Math.max(0, from - rewindNextPollBy);
+          rewindNextPollBy = 0;
+        }
+        const tag = params.arguments?.tag;
+        const max = params.maxEvents ?? EVENTS_DEFAULT_MAX;
+        const pending = eventOutbox.filter((e) => e.seq > from);
+        const batch = pending.slice(0, max);
+        const cursor = batch.length > 0 ? batch[batch.length - 1]!.seq : Math.max(from, head);
+        return {
+          ...pollEnvelope,
+          events: batch
+            .filter((e) => tag === undefined || e.data.tag === tag)
+            .map(({ seq: _seq, ...event }) => event),
+          cursor: String(cursor),
+          truncated: false,
+          hasMore: pending.length > batch.length,
+        };
+      }
+    );
+  }
+
   // Prompts (only register handlers if capability is enabled)
   if (!NO_PROMPTS) {
     server.setRequestHandler('prompts/list', async (request) => {
@@ -694,6 +820,18 @@ async function main() {
         return;
       }
 
+      if (action === 'get-emitted-events' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ events: eventOutbox }));
+        return;
+      }
+
+      if (action === 'get-events-routing' && req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ routing: eventsRoutingLog }));
+        return;
+      }
+
       if (action === 'get-task-routing' && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ routing: taskRoutingLog }));
@@ -715,7 +853,48 @@ async function main() {
           return;
         }
 
+        case 'emit-events': {
+          const count = parseInt(url.searchParams.get('count') || '1', 10);
+          const tag = url.searchParams.get('tag');
+          for (let i = 0; i < count; i++) {
+            const seq = (eventOutbox.length > 0 ? eventOutbox[eventOutbox.length - 1]!.seq : 0) + 1;
+            eventOutbox.push({
+              seq,
+              eventId: `evt_${seq}`,
+              name: 'test.durable',
+              timestamp: new Date().toISOString(),
+              data: { n: seq, ...(tag !== null && { tag }) },
+            });
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ emitted: count, head: eventOutbox.length }));
+          return;
+        }
+
+        case 'truncate-next-poll':
+          truncateNextPoll = true;
+          res.writeHead(200);
+          res.end('Next events/poll with a cursor answers truncated');
+          return;
+
+        case 'rewind-next-poll':
+          rewindNextPollBy = parseInt(url.searchParams.get('by') || '1', 10);
+          res.writeHead(200);
+          res.end(`Next events/poll replays ${rewindNextPollBy} delivered events`);
+          return;
+
+        case 'forbid-events':
+          eventsForbidden = true;
+          res.writeHead(200);
+          res.end('events/poll answers Forbidden from now on');
+          return;
+
         case 'reset':
+          eventOutbox.length = 0;
+          truncateNextPoll = false;
+          rewindNextPollBy = 0;
+          eventsForbidden = false;
+          eventsRoutingLog.length = 0;
           failNextCount = 0;
           counterValue = 0;
           lastClientCapabilities = null;

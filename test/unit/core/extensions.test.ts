@@ -12,6 +12,7 @@ import {
   ENTERPRISE_MANAGED_AUTH_EXTENSION_KEY,
   MCP_EXTENSIONS,
   SKILLS_EXTENSION_KEY,
+  EVENTS_EXTENSION_KEY,
   TASKS_EXTENSION_KEY,
   clientExtensionDeclarations,
   declaredExtensionSettings,
@@ -71,12 +72,13 @@ describe('MCP extension registry', () => {
     expect(findMcpExtension('com.example/not-an-extension')).toBeUndefined();
   });
 
-  it('declares the two auth extensions and tasks, with no settings', () => {
+  it('declares the two auth extensions, events and tasks, with no settings', () => {
     // A server may only hand a task to a client that declared the tasks extension on
     // that request, so the declaration has to ride along everywhere.
     expect(clientExtensionDeclarations()).toEqual({
       [CLIENT_CREDENTIALS_EXTENSION_KEY]: {},
       [ENTERPRISE_MANAGED_AUTH_EXTENSION_KEY]: {},
+      [EVENTS_EXTENSION_KEY]: {},
       [TASKS_EXTENSION_KEY]: {},
     });
   });

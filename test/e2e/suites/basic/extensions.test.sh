@@ -60,7 +60,7 @@ run_mcpc "$SESSION" tools-call echo message:=hi
 assert_success
 CLIENT_CAPS=$(server_get_client_capabilities)
 assert_json_eq "$CLIENT_CAPS" '.capabilities.extensions | keys | sort | join(",")' \
-  "io.modelcontextprotocol/enterprise-managed-authorization,io.modelcontextprotocol/oauth-client-credentials,io.modelcontextprotocol/tasks"
+  "io.modelcontextprotocol/enterprise-managed-authorization,io.modelcontextprotocol/events,io.modelcontextprotocol/oauth-client-credentials,io.modelcontextprotocol/tasks"
 assert_json_eq "$CLIENT_CAPS" '.capabilities.extensions["io.modelcontextprotocol/oauth-client-credentials"] | tojson' "{}"
 assert_json_eq "$CLIENT_CAPS" '.capabilities.extensions["io.modelcontextprotocol/enterprise-managed-authorization"] | tojson' "{}"
 assert_json_eq "$CLIENT_CAPS" '.capabilities.extensions["io.modelcontextprotocol/tasks"] | tojson' "{}"

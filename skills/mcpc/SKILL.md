@@ -264,6 +264,23 @@ your user's say-so.
 
 (`mcpc help --skill` documents mcpc itself; `skills-list` / `skills-get` fetch skills from the server.)
 
+## Server events
+
+Servers declaring the draft `io.modelcontextprotocol/events` extension (MCP 2026-07-28+)
+publish event types you can subscribe to. The session bridge journals every event durably:
+
+```bash
+mcpc @app events-list                         # event types and their arguments
+mcpc @app events-subscribe <name> [k:=v ...]  # starts now; no replay of earlier events
+mcpc --json @app events-tail                  # unacknowledged records, oldest first
+mcpc @app events-ack <seq>...                 # or --all; until acked, tail repeats them
+```
+
+Delivery is at-least-once, so handle each `seq` idempotently and ack after acting on it.
+Records with `"kind": "gap"` mean events may be missing (`truncated`, `no-replay`,
+`terminated`); re-read authoritative state with tools when that matters. Use
+`--agent <name>` (or `MCPC_AGENT`) to keep your acks separate from other agents.
+
 ## Global flags worth knowing
 
 ```bash

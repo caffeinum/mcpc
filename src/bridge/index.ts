@@ -67,6 +67,8 @@ import { createClientCredentialsProvider } from '../lib/auth/client-credentials.
 import { createIdJagProvider } from '../lib/auth/id-jag.js';
 import type { Tool, Resource, Prompt } from '@modelcontextprotocol/client';
 import { ResourceSyncManager } from './resource-sync.js';
+import { EventPoller } from './event-poller.js';
+import { EventJournal, getEventsDir } from '../lib/event-journal.js';
 import { isModernProtocolVersion } from '../core/protocol.js';
 import type { AnyTask, DetachedToolCall, TaskUpdate, TasksPage } from '../lib/types.js';
 import { createRequire } from 'module';
@@ -150,6 +152,7 @@ class BridgeProcess {
 
   // Resource→file sync for resources-subscribe (created once the MCP client connects)
   private resourceSync: ResourceSyncManager | null = null;
+  private eventPoller: EventPoller | null = null;
 
   // Handshake results persisted at the original connect, used only when this bridge
   // resumed a server-side session: resumption skips `initialize`, so the SDK client
@@ -542,6 +545,9 @@ class BridgeProcess {
         // Re-establish persisted resource subscriptions in the background —
         // failures are recorded per subscription, never block startup
         void this.restoreResourceSubscriptions();
+        void this.eventPoller?.startAll().catch((error: unknown) => {
+          logger.error('Failed to resume event subscriptions:', error);
+        });
       } catch (error) {
         // Signal that MCP connection or proxy startup failed (rejects pending requests with actual error)
         // Don't exit immediately - stay alive briefly so CLI can receive the error
@@ -825,6 +831,16 @@ class BridgeProcess {
     });
     const sessionData = await getSession(this.options.sessionName);
     this.resourceSync.load(sessionData?.resourceSubscriptions);
+    // Events extension: poll loops write into a durable per-session journal
+    // (events-subscribe / events-tail). Loops resume once the client is ready.
+    this.eventPoller = new EventPoller({
+      poll: (params) => client.pollEvents(params),
+      journal: await EventJournal.open(getEventsDir(this.options.sessionName)),
+      persist: (entries) =>
+        updateSession(this.options.sessionName, { eventSubscriptions: entries }),
+      logger: createLogger('events'),
+    });
+    this.eventPoller.load(sessionData?.eventSubscriptions);
     this.client
       .getSDKClient()
       .setNotificationHandler('notifications/resources/updated', (notification) => {
@@ -1720,6 +1736,32 @@ class BridgeProcess {
           break;
         }
 
+        case 'listEvents': {
+          result = await this.client.listEvents();
+          break;
+        }
+
+        case 'subscribeEvents': {
+          const params = message.params as { name: string; arguments?: Record<string, unknown> };
+          if (!params?.name) {
+            throw new ClientError('subscribeEvents requires name');
+          }
+          if (!this.eventPoller) {
+            throw new NetworkError('MCP client not connected');
+          }
+          result = await this.eventPoller.add(params.name, params.arguments);
+          break;
+        }
+
+        case 'unsubscribeEvents': {
+          const params = message.params as { id: string };
+          if (!this.eventPoller) {
+            throw new NetworkError('MCP client not connected');
+          }
+          result = await this.eventPoller.remove(params.id);
+          break;
+        }
+
         case 'listSkills': {
           const cursor = message.params as string | undefined;
           result = await this.client.listSkills(cursor);
@@ -2036,6 +2078,13 @@ class BridgeProcess {
       clearInterval(this.keepaliveInterval);
       this.keepaliveInterval = null;
       logger.debug('Keepalive interval stopped');
+    }
+
+    if (this.eventPoller) {
+      await this.eventPoller.stopAll().catch((error: unknown) => {
+        logger.warn('Failed to stop event polling:', error);
+      });
+      this.eventPoller = null;
     }
 
     // Stop proxy server if running

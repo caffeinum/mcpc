@@ -8,6 +8,10 @@ import { StreamableHTTPClientTransport } from '../../../src/core/transports.js';
 import { ClientError } from '../../../src/lib/errors.js';
 import { proxyFetch } from '../../../src/lib/proxy.js';
 
+vi.mock('../../../src/lib/proxy.js', () => ({
+  proxyFetch: vi.fn(async () => new Response('ok')),
+}));
+
 // Mock the SDK transports
 vi.mock('@modelcontextprotocol/client/stdio', () => ({
   StdioClientTransport: vi.fn(function () {
@@ -79,7 +83,7 @@ describe('createTransportFromConfig', () => {
     expect(transport).toBeDefined();
   });
 
-  it('should inject proxyFetch into HTTP transport when no custom fetch is provided', () => {
+  it('should inject proxyFetch into HTTP transport when no custom fetch is provided', async () => {
     const mock = StreamableHTTPClientTransport as Mock;
     mock.mockClear();
     createTransportFromConfig({
@@ -88,10 +92,12 @@ describe('createTransportFromConfig', () => {
 
     expect(mock).toHaveBeenCalledTimes(1);
     const [, options] = mock.mock.calls[0];
-    expect(options.fetch).toBe(proxyFetch);
+    const init = { method: 'POST', body: '{"method":"tools/list"}' };
+    await options.fetch('https://mcp.example.com', init);
+    expect(proxyFetch).toHaveBeenCalledWith('https://mcp.example.com', init);
   });
 
-  it('should preserve custom fetch when provided (e.g. x402 middleware)', () => {
+  it('should preserve custom fetch when provided (e.g. x402 middleware)', async () => {
     const mock = StreamableHTTPClientTransport as Mock;
     mock.mockClear();
     const customFetch = vi.fn();
@@ -102,6 +108,44 @@ describe('createTransportFromConfig', () => {
 
     expect(mock).toHaveBeenCalledTimes(1);
     const [, options] = mock.mock.calls[0];
-    expect(options.fetch).toBe(customFetch);
+    const init = { method: 'POST', body: '{"method":"tools/list"}' };
+    await options.fetch('https://mcp.example.com', init);
+    expect(customFetch).toHaveBeenCalledWith('https://mcp.example.com', init);
+  });
+
+  it('sets the Mcp-Name routing header on events requests (SEP-3415)', async () => {
+    const mock = StreamableHTTPClientTransport as Mock;
+    mock.mockClear();
+    const customFetch = vi.fn(async () => new Response('ok'));
+    createTransportFromConfig(
+      { url: 'https://mcp.example.com' },
+      { customFetch: customFetch as any }
+    );
+    const [, options] = mock.mock.calls[0];
+    const body = (name: string) =>
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'events/poll',
+        params: { name, cursor: null },
+      });
+
+    await options.fetch('https://mcp.example.com', {
+      method: 'POST',
+      body: body('email.received'),
+    });
+    await options.fetch('https://mcp.example.com', { method: 'POST', body: body('épisode') });
+    await options.fetch('https://mcp.example.com', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'events/list' }),
+    });
+
+    const header = (call: number) =>
+      new Headers(
+        (customFetch.mock.calls[call] as unknown as [string, RequestInit])[1].headers
+      ).get('mcp-name');
+    expect(header(0)).toBe('email.received');
+    expect(header(1)).toBe(`=?base64?${Buffer.from('épisode').toString('base64')}?=`);
+    expect(header(2)).toBeNull();
   });
 });

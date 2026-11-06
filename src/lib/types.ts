@@ -218,6 +218,7 @@ export interface SessionData {
   notifications?: SessionNotifications; // Last list change notification timestamps
   activeTasks?: Record<string, ActiveTaskEntry>; // Active async tasks for crash recovery
   resourceSubscriptions?: Record<string, ResourceSubscriptionEntry>; // Resource→file syncs, keyed by URI
+  eventSubscriptions?: Record<string, EventSubscriptionEntry>; // Events extension subscriptions, keyed by id
   // Timestamps (ISO 8601 strings)
   createdAt: string; // When the session was created
   lastSeenAt?: string; // Last successful server response (ping, command, etc.)
@@ -245,6 +246,20 @@ export interface ResourceSubscriptionEntry {
   subscribedAt: string; // ISO 8601
   lastSyncedAt?: string; // ISO 8601 — last successful file write
   lastError?: string; // Last sync/re-subscribe failure (cleared on next success)
+}
+
+/**
+ * An events-extension subscription (`events-subscribe`), polled by the bridge into the
+ * session's event journal. Persisted in sessions.json so polling resumes after a restart;
+ * the cursor itself lives in the journal's state file, next to the data it covers.
+ */
+export interface EventSubscriptionEntry {
+  id: string; // Event name, plus a digest of the arguments when there are any
+  name: string;
+  arguments?: Record<string, unknown>;
+  subscribedAt: string; // ISO 8601
+  lastError?: string; // Last poll failure (cleared on next success)
+  terminatedAt?: string; // ISO 8601 — set when the server ended the subscription
 }
 
 /**

@@ -49,6 +49,13 @@ import {
   isTerminalTaskStatus,
   validateCreatedTask,
 } from './tasks-schema.js';
+import {
+  ListEventsResultSchema,
+  PollEventsResultSchema,
+  type EventDescriptor,
+  type PollEventsParams,
+  type PollEventsResult,
+} from './events-schema.js';
 import { CreatedTaskShim } from './tasks-result-shim.js';
 import { createNoOpLogger, type Logger } from '../lib/logger.js';
 import { ClientError, ServerError, NetworkError, isShutdownError } from '../lib/errors.js';
@@ -62,12 +69,15 @@ import {
   taskInputRequiredMessage,
   skillsUnavailableMessage,
   skillsNotDeclaredMessage,
+  eventsUnavailableMessage,
+  eventsNotDeclaredMessage,
   directoryReadUnavailableMessage,
   completionsNotDeclaredMessage,
   SERVER_INFO_META_KEY,
   SUPPORTED_PROTOCOL_VERSIONS,
 } from './protocol.js';
 import {
+  EVENTS_EXTENSION_KEY,
   SKILLS_EXTENSION_KEY,
   TASKS_EXTENSION_KEY,
   declaredExtensionSettings,
@@ -1131,6 +1141,58 @@ export class McpClient implements IMcpClient {
         originalError: error,
       });
     }
+  }
+
+  /**
+   * Refuse event traffic the server has not promised to serve: the extension is specified
+   * against 2026-07-28 and later, and a client MUST NOT send `events/*` to a server that
+   * has not declared it.
+   */
+  private assertEventsAvailable(): void {
+    if (this.getProtocolEra() !== 'modern') {
+      throw new ServerError(eventsUnavailableMessage(this.negotiatedProtocolVersion));
+    }
+    if (
+      declaredExtensionSettings(this.client.getServerCapabilities(), EVENTS_EXTENSION_KEY) ===
+      undefined
+    ) {
+      throw new ServerError(eventsNotDeclaredMessage());
+    }
+  }
+
+  /** List every event type the server offers (`events/list`, all pages). */
+  async listEvents(): Promise<EventDescriptor[]> {
+    this.assertEventsAvailable();
+    try {
+      return await fetchAllPages(
+        async (cursor) =>
+          this.client.request(
+            { method: 'events/list', ...(cursor ? { params: { cursor } } : {}) },
+            ListEventsResultSchema,
+            this.getRequestOptions()
+          ),
+        (page) => page.events
+      );
+    } catch (error) {
+      this.logger.error('Failed to list events:', error);
+      throw new ServerError(`Failed to list events: ${(error as Error).message}`, {
+        originalError: error,
+      });
+    }
+  }
+
+  /**
+   * Poll one subscription once (`events/poll`). Errors are rethrown unwrapped so the
+   * caller can tell a terminal SEP-3415 error code (NotFound, Forbidden, ...) from a
+   * transient failure.
+   */
+  async pollEvents(params: PollEventsParams): Promise<PollEventsResult> {
+    this.assertEventsAvailable();
+    return this.client.request(
+      { method: 'events/poll', params: { ...params } },
+      PollEventsResultSchema,
+      this.getRequestOptions()
+    );
   }
 
   /**
