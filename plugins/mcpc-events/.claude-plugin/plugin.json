@@ -1,0 +1,7 @@
+{
+  "name": "mcpc-events",
+  "version": "0.1.0",
+  "description": "Deliver MCP server events journaled by mcpc into Claude Code: pending events on session start, and new ones before the agent goes idle",
+  "author": { "name": "caffeinum" },
+  "repository": "https://github.com/caffeinum/mcpc"
+}

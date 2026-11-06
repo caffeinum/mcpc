@@ -151,6 +151,7 @@ Commands:
   restart <@session>             Restart a session (losing all state)
   login <server>                 Log in to a server and save an OAuth profile
   logout <server>                Delete an OAuth profile for a server
+  events-hook <event>            Claude Code hook: show pending events (see below)
   supervise                      Keep sessions that receive events connected
   clean [resources...]           Clean up mcpc data (sessions, profiles, logs, all)
   grep <pattern>                 Search tools and instructions across all active sessions
@@ -1244,6 +1245,11 @@ mcpc @app events-tail --unrouted                # addressed to nobody subscribed
 A crashed bridge is restarted on the next command for its session. To keep event sessions
 listening without that, run `mcpc supervise` (or install it as a service with
 `mcpc supervise --install`, launchd on macOS, systemd on Linux).
+
+To get events into Claude Code sessions without channels, install the `mcpc-events` plugin from
+this repository (in Claude Code: `/plugin install mcpc-events --marketplace caffeinum/mcpc`). Its SessionStart hook adds the agent's unacknowledged events to a new session's
+context, and its Stop hook keeps the agent working when new events arrived while it worked. Set
+`MCPC_AGENT` (and optionally `MCPC_EVENTS_SESSIONS`, e.g. `@office`) in the session's environment.
 
 Servers that declare the `claude/channel` capability ([Claude Code channels](https://code.claude.com/docs/en/channels))
 push messages without ids or replay. On MCP `2025-11-25` sessions `mcpc` journals each one under

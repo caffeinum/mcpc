@@ -833,6 +833,30 @@ ${jsonHelp('Interactive prompts go to stderr; stdout is a clean JSON object', '`
 
   // clean command: mcpc clean [resources...]
   program
+    .command('events-hook <event>')
+    .description('Claude Code hook: show pending events (see below)')
+    .addHelpText(
+      'after',
+      `
+${chalk.bold('Notes:')}
+  Run by Claude Code hooks (the mcpc-events plugin installs them), with the hook
+  JSON on stdin. <event> is session-start or stop. session-start adds this
+  agent's unacknowledged events to the new session's context; stop keeps the
+  agent working when events arrived it has not seen yet. Events stay until the
+  agent runs events-ack. The agent is MCPC_AGENT (default "default"); the MCP
+  sessions are MCPC_EVENTS_SESSIONS (comma-separated), else every session with
+  an event journal.
+
+${chalk.bold('Example (settings.json hook command):')}
+  MCPC_AGENT=reviewer mcpc events-hook stop
+${jsonHelp('Claude Code hook output: `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } }` or `{ decision: "block", reason }`; nothing when there is nothing to show')}`
+    )
+    .action(async (event: string) => {
+      const { eventsHook } = await import('./commands/events-hook.js');
+      await eventsHook(event);
+    });
+
+  program
     .command('supervise')
     .description('Keep sessions that receive events connected')
     .option('--once', 'Check and restart once, then exit')

@@ -13,6 +13,7 @@ New to mcpc? Start with the [README](../README.md), or run `mcpc help --skill` f
 - [`mcpc restart`](#mcpc-restart)
 - [`mcpc login`](#mcpc-login)
 - [`mcpc logout`](#mcpc-logout)
+- [`mcpc events-hook`](#mcpc-events-hook)
 - [`mcpc supervise`](#mcpc-supervise)
 - [`mcpc clean`](#mcpc-clean)
 - [`mcpc grep`](#mcpc-grep)
@@ -69,6 +70,7 @@ Commands:
   restart <@session>             Restart a session (losing all state)
   login <server>                 Log in to a server and save an OAuth profile
   logout <server>                Delete an OAuth profile for a server
+  events-hook <event>            Claude Code hook: show pending events (see below)
   supervise                      Keep sessions that receive events connected
   clean [resources...]           Clean up mcpc data (sessions, profiles, logs, all)
   grep <pattern>                 Search tools and instructions across all active sessions
@@ -318,6 +320,32 @@ Options:
 
 JSON output (--json):
   `{ profile, serverUrl, deleted: true, affectedSessions }`
+```
+
+## `mcpc events-hook`
+
+```text
+Usage: mcpc events-hook [options] <event>
+
+Claude Code hook: show pending events (see below)
+
+Options:
+  --json  Output in JSON format
+
+Notes:
+  Run by Claude Code hooks (the mcpc-events plugin installs them), with the hook
+  JSON on stdin. <event> is session-start or stop. session-start adds this
+  agent's unacknowledged events to the new session's context; stop keeps the
+  agent working when events arrived it has not seen yet. Events stay until the
+  agent runs events-ack. The agent is MCPC_AGENT (default "default"); the MCP
+  sessions are MCPC_EVENTS_SESSIONS (comma-separated), else every session with
+  an event journal.
+
+Example (settings.json hook command):
+  MCPC_AGENT=reviewer mcpc events-hook stop
+
+JSON output (--json):
+  Claude Code hook output: `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext } }` or `{ decision: "block", reason }`; nothing when there is nothing to show
 ```
 
 ## `mcpc supervise`

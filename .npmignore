@@ -41,3 +41,7 @@ README.placeholder.md
 # Misc
 .DS_Store
 coverage/
+
+# Claude Code plugin and marketplace (installed from git, not npm)
+plugins/
+.claude-plugin/

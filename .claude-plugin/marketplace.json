@@ -1,0 +1,14 @@
+{
+  "name": "mcpc",
+  "description": "Claude Code plugins for mcpc, the universal MCP command-line client",
+  "owner": {
+    "name": "caffeinum"
+  },
+  "plugins": [
+    {
+      "name": "mcpc-events",
+      "source": "./plugins/mcpc-events",
+      "description": "Deliver MCP server events journaled by mcpc into Claude Code sessions"
+    }
+  ]
+}

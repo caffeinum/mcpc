@@ -283,6 +283,8 @@ Records with `"kind": "gap"` mean events may be missing (`truncated`, `no-replay
 Sharing a session with other agents: set `MCPC_AGENT=<you>` before `events-subscribe` so you
 are a recipient, and you only see (and can only ack) records routed to you. `events-route <sub>
 --path data.meta.to` delivers addressed records to the agent they name.
+With the `mcpc-events` Claude Code plugin installed, pending events for `MCPC_AGENT` are shown to
+you at session start and when you try to stop; acknowledge them with the `events-ack` command given.
 Claude Code channel messages (servers declaring `claude/channel`, 2025-11-25 sessions) land in
 the same journal as `sub: "claude/channel"` with the message in `data.content`.
 

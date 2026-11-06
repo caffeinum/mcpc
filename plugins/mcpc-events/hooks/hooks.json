@@ -1,0 +1,27 @@
+{
+  "description": "mcpc events: show unacknowledged MCP events at session start and before stopping",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/events-hook.sh\" session-start",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/events-hook.sh\" stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

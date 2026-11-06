@@ -144,6 +144,7 @@ export const KNOWN_COMMANDS = [
   'restart',
   'clean',
   'supervise',
+  'events-hook',
   'grep',
   'x402',
 ];
