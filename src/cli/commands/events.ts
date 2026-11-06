@@ -27,6 +27,7 @@ import {
   type JournalRecord,
 } from '../../lib/event-journal.js';
 import { withMcpClient } from '../helpers.js';
+import { CHANNEL_SUBSCRIPTION } from '../../bridge/channel-receiver.js';
 import { readCommandArgs } from '../parser.js';
 import { formatOutput, formatSuccess } from '../output.js';
 
@@ -228,14 +229,29 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
   const { getSession } = await import('../../lib/sessions.js');
   const session = await getSession(target);
   const [cursors, unacked] = await Promise.all([readCursors(dir), readUnacked(dir, agent)]);
-  const subscriptions = Object.values(session?.eventSubscriptions ?? {}).map(
+  const polled = Object.values(session?.eventSubscriptions ?? {}).map(
     (entry: EventSubscriptionEntry) => ({
+      source: 'events' as const,
       ...entry,
       cursor: cursors[entry.id]?.cursor ?? null,
       cursorUpdatedAt: cursors[entry.id]?.updatedAt,
       unacked: unacked.filter((r) => r.sub === entry.id).length,
     })
   );
+  // A claude/channel listener has no subscription entry: the server pushes on its own.
+  const channel = cursors[CHANNEL_SUBSCRIPTION]
+    ? [
+        {
+          source: 'channel' as const,
+          id: CHANNEL_SUBSCRIPTION,
+          name: CHANNEL_SUBSCRIPTION,
+          cursor: null,
+          cursorUpdatedAt: cursors[CHANNEL_SUBSCRIPTION].updatedAt,
+          unacked: unacked.filter((r) => r.sub === CHANNEL_SUBSCRIPTION).length,
+        },
+      ]
+    : [];
+  const subscriptions = [...polled, ...channel];
   const unackedGaps = unacked.filter((r) => r.kind === 'gap').length;
 
   if (options.outputMode !== 'human') {
@@ -248,13 +264,17 @@ export async function eventsStatus(target: string, options: EventsAgentOptions):
     console.log(chalk.dim('No event subscriptions.'));
   }
   for (const sub of subscriptions) {
-    const state = sub.terminatedAt
-      ? chalk.red('terminated')
-      : sub.lastError
-        ? chalk.yellow('retrying')
-        : chalk.green('polling');
+    const state =
+      sub.source === 'channel'
+        ? chalk.green('listening')
+        : sub.terminatedAt
+          ? chalk.red('terminated')
+          : sub.lastError
+            ? chalk.yellow('retrying')
+            : chalk.green('polling');
     console.log(`${chalk.bold(sub.id)}  ${state}  ${chalk.dim(`${sub.unacked} unacked`)}`);
-    if (sub.lastError) console.log(chalk.dim(`  last error: ${sub.lastError}`));
+    if ('lastError' in sub && sub.lastError)
+      console.log(chalk.dim(`  last error: ${sub.lastError}`));
     if (sub.cursorUpdatedAt) console.log(chalk.dim(`  cursor advanced: ${sub.cursorUpdatedAt}`));
   }
   console.log('');

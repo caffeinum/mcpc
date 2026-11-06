@@ -68,6 +68,7 @@ import { createIdJagProvider } from '../lib/auth/id-jag.js';
 import type { Tool, Resource, Prompt } from '@modelcontextprotocol/client';
 import { ResourceSyncManager } from './resource-sync.js';
 import { EventPoller } from './event-poller.js';
+import { CHANNEL_NOTIFICATION, ChannelReceiver, declaresChannel } from './channel-receiver.js';
 import { EventJournal, getEventsDir } from '../lib/event-journal.js';
 import { isModernProtocolVersion } from '../core/protocol.js';
 import type { AnyTask, DetachedToolCall, TaskUpdate, TasksPage } from '../lib/types.js';
@@ -81,7 +82,7 @@ import type { ProxyConfig } from '../lib/types.js';
 // only here and load the implementations lazily at the x402-gated call sites.
 import type { X402PaymentCache } from '../lib/x402/fetch-middleware.js';
 import type { SignerWallet } from '../lib/x402/signer.js';
-import type { FetchLike } from '@modelcontextprotocol/client';
+import type { FetchLike, StandardSchemaV1 } from '@modelcontextprotocol/client';
 import { IpcLineBuffer } from '../lib/ipc-line-buffer.js';
 
 // HTTP proxy and TLS settings are configured in main() after parsing --insecure flag
@@ -153,6 +154,7 @@ class BridgeProcess {
   // Resource→file sync for resources-subscribe (created once the MCP client connects)
   private resourceSync: ResourceSyncManager | null = null;
   private eventPoller: EventPoller | null = null;
+  private channelReceiver: ChannelReceiver | null = null;
 
   // Handshake results persisted at the original connect, used only when this bridge
   // resumed a server-side session: resumption skips `initialize`, so the SDK client
@@ -833,9 +835,10 @@ class BridgeProcess {
     this.resourceSync.load(sessionData?.resourceSubscriptions);
     // Events extension: poll loops write into a durable per-session journal
     // (events-subscribe / events-tail). Loops resume once the client is ready.
+    const eventJournal = await EventJournal.open(getEventsDir(this.options.sessionName));
     this.eventPoller = new EventPoller({
       poll: (params) => client.pollEvents(params),
-      journal: await EventJournal.open(getEventsDir(this.options.sessionName)),
+      journal: eventJournal,
       persist: (entries) =>
         updateSession(this.options.sessionName, { eventSubscriptions: entries }),
       logger: createLogger('events'),
@@ -865,6 +868,29 @@ class BridgeProcess {
 
     // Update session with protocol version, MCP session ID, and lastSeenAt
     const serverDetails = await this.getServerDetails();
+
+    // Claude Code channels: push-only messages, journaled next to polled events. Only a
+    // 2025-11-25 session can receive them (2026-07-28 has no unsolicited stream).
+    if (this.client.getProtocolEra() !== 'modern' && declaresChannel(serverDetails.capabilities)) {
+      const receiver = new ChannelReceiver({
+        journal: eventJournal,
+        logger: createLogger('channel'),
+      });
+      this.channelReceiver = receiver;
+      await receiver.start();
+      this.client
+        .getSDKClient()
+        .setNotificationHandler(
+          CHANNEL_NOTIFICATION,
+          { params: anyObjectSchema },
+          async (params) => {
+            await receiver.handle(params).catch((error: unknown) => {
+              logger.error('Failed to journal channel message:', error);
+            });
+          }
+        );
+      logger.info('Journaling claude/channel messages');
+    }
     const newMcpSessionId = this.client.getMcpSessionId();
 
     // Detect session ID mismatch: we tried to resume but server did not return the
@@ -1112,8 +1138,16 @@ class BridgeProcess {
     }
 
     logger.debug('Sending keepalive ping');
-    await this.client.ping();
+    try {
+      await this.client.ping();
+    } catch (error) {
+      this.channelReceiver?.markDown();
+      throw error;
+    }
     logger.debug('Keepalive ping successful');
+    await this.channelReceiver?.markUp().catch((error: unknown) => {
+      logger.error('Failed to record channel gap:', error);
+    });
 
     // Update lastSeenAt on successful ping
     await this.updateLastSeenAt();
@@ -2259,3 +2293,15 @@ main().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
+
+/** Accepts any params object: a channel message must never be dropped by validation. */
+const anyObjectSchema: StandardSchemaV1<unknown, Record<string, unknown>> = {
+  '~standard': {
+    version: 1,
+    vendor: 'mcpc',
+    validate: (value: unknown) =>
+      typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? { value: value as Record<string, unknown> }
+        : { value: { params: value } as Record<string, unknown> },
+  },
+};

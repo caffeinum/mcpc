@@ -9,11 +9,16 @@ Each version opens with a one-line summary, which also opens its GitHub release.
 
 ## [Unreleased]
 
-Durable server events: subscribe to the draft MCP Events extension and consume every event at least once.
+Durable server events and Claude Code channel messages, consumed at least once, and notifications that survive a bridge restart.
 
 ### Added
 
 - Support for the draft MCP [Events extension](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/3415) (`io.modelcontextprotocol/events`) on MCP 2026-07-28 servers: `events-list`, `events-subscribe` and `events-unsubscribe` manage subscriptions that the session bridge polls into a crash-safe journal, and `events-tail` / `events-ack` / `events-status` consume it at least once per agent, with any server-side loss recorded as a gap.
+- Claude Code channel messages (`notifications/claude/channel`) from servers declaring the `claude/channel` capability are journaled automatically on MCP 2025-11-25 sessions and read with the same `events-tail` / `events-ack`; any window in which the bridge could not listen is recorded as a `disconnected` gap.
+
+### Fixed
+
+- Server-initiated notifications (list changes, resource updates) are delivered again after a session bridge restarts on an MCP 2025-11-25 HTTP server; previously the resumed session never reopened its notification stream.
 
 ## [0.8.0] - 2026-11-04
 

@@ -32,7 +32,9 @@ export type GapReason =
   /** The event type has no replay (`cursor: null`), so events during downtime are lost. */
   | 'no-replay'
   /** The server ended the subscription (`NotFound`, `Forbidden`, `InvalidParams`, ...). */
-  | 'terminated';
+  | 'terminated'
+  /** A push-only source (e.g. `claude/channel`) was unreachable; anything sent meanwhile is lost. */
+  | 'disconnected';
 
 interface RecordBase {
   /** Local monotonic sequence number, unique within the session's journal. */
@@ -212,6 +214,8 @@ export class EventJournal {
   private state: JournalState;
   /** Whether the journal file's directory entry is known to be durable. */
   private journalFileDurable = false;
+  /** Tail of the write queue: commits run one at a time so seqs never collide. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   private constructor(
     private readonly dir: string,
@@ -247,7 +251,18 @@ export class EventJournal {
    * Events already journaled for the subscription (same `eventId`) are dropped.
    * @returns the records actually written, with their assigned seqs
    */
-  async commit(
+  commit(sub: string, batch: NewJournalRecord[], cursor: string | null): Promise<JournalRecord[]> {
+    return this.serialize(() => this.commitNow(sub, batch, cursor));
+  }
+
+  /** Run writes one at a time; a failed write does not block the ones after it. */
+  private serialize<T>(write: () => Promise<T>): Promise<T> {
+    const next = this.writes.then(write, write);
+    this.writes = next.catch(() => undefined);
+    return next;
+  }
+
+  private async commitNow(
     sub: string,
     batch: NewJournalRecord[],
     cursor: string | null
@@ -297,7 +312,11 @@ export class EventJournal {
   }
 
   /** Forget a subscription's cursor (on unsubscribe). Its journaled records stay. */
-  async dropCursor(sub: string): Promise<void> {
+  dropCursor(sub: string): Promise<void> {
+    return this.serialize(() => this.dropCursorNow(sub));
+  }
+
+  private async dropCursorNow(sub: string): Promise<void> {
     if (!(sub in this.state.cursors)) return;
     const cursors = { ...this.state.cursors };
     delete cursors[sub];

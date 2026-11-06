@@ -447,6 +447,11 @@ export class McpClient implements IMcpClient {
         this.logger.debug('Transport closed');
       };
 
+      // A transport created with a session id resumes that session: the SDK skips the
+      // initialize handshake, and with it the notifications/initialized send that is the
+      // only thing that opens the 2025-era GET stream for server-initiated messages.
+      const resuming = Boolean(transport.sessionId);
+
       await this.client.connect(transport);
 
       this.hasConnected = true;
@@ -468,6 +473,10 @@ export class McpClient implements IMcpClient {
       if (transport.sessionId) {
         this.mcpSessionId = transport.sessionId;
         this.logger.debug(`MCP session ID: ${this.mcpSessionId}`);
+      }
+
+      if (resuming && this.getProtocolEra() !== 'modern') {
+        await this.openServerStream(transport);
       }
 
       // On 2026-07-28 connections the SDK auto-opens a subscriptions/listen stream for
@@ -1140,6 +1149,26 @@ export class McpClient implements IMcpClient {
       throw new ServerError(`Failed to read directory ${uri}: ${(error as Error).message}`, {
         originalError: error,
       });
+    }
+  }
+
+  /**
+   * Open the 2025-era GET stream on a resumed session, so server-initiated messages
+   * (list changes, resource updates, Claude Code channel messages) keep arriving after a
+   * bridge restart. `resumeStream` is the SDK's public way to open that stream; an empty
+   * event id sends no `Last-Event-ID`. A server without the stream answers 405, which the
+   * SDK treats as "no stream". Failures are logged, never fatal: requests still work.
+   */
+  private async openServerStream(transport: Transport): Promise<void> {
+    const resumable = transport as Transport & {
+      resumeStream?: (lastEventId: string) => Promise<void>;
+    };
+    if (typeof resumable.resumeStream !== 'function') return;
+    try {
+      await resumable.resumeStream('');
+      this.logger.debug('Opened server notification stream for the resumed session');
+    } catch (error) {
+      this.logger.warn('Could not open the server notification stream after resuming:', error);
     }
   }
 

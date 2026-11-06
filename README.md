@@ -1226,6 +1226,11 @@ silently: the server resuming past our cursor (`truncated`), an event type witho
 restarting, or the server ending the subscription. Acknowledgements are kept per agent
 (`--agent <name>` or `MCPC_AGENT`), so several agents can consume one session's events.
 
+Servers that declare the `claude/channel` capability ([Claude Code channels](https://code.claude.com/docs/en/channels))
+push messages without ids or replay. On MCP `2025-11-25` sessions `mcpc` journals each one under
+`sub: "claude/channel"`, so they are read and acknowledged the same way; every window in which the
+bridge could not be listening (a restart, an unreachable server) becomes a `disconnected` gap.
+
 ### Skills
 
 Implements the [MCP Skills extension](https://github.com/modelcontextprotocol/ext-skills)

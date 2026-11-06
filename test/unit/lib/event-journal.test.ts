@@ -92,6 +92,17 @@ describe('event journal', () => {
     expect((await readJournal(dir)).map((r) => r.seq)).toEqual([1, 2]);
   });
 
+  it('assigns unique seqs to concurrent commits', async () => {
+    const journal = await EventJournal.open(dir);
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        journal.commit(`s${i % 3}`, [event(`s${i % 3}`, `e${i}`)], `c${i}`)
+      )
+    );
+    const seqs = (await readJournal(dir)).map((r) => r.seq);
+    expect(seqs).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+  });
+
   it('never dedupes gap records', async () => {
     const journal = await EventJournal.open(dir);
     const gap: NewJournalRecord = {

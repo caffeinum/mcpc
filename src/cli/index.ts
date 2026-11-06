@@ -1387,7 +1387,7 @@ ${jsonHelp('`{ subscribed: true, uri, file, bytes, mimeType? }`')}`
   const agentHelp = 'Agent whose acks to use (default: $MCPC_AGENT or "default")';
   const eventRecordShape =
     '`{ seq, kind: "event", sub, name, eventId, timestamp, receivedAt, data, _meta? }` or ' +
-    '`{ seq, kind: "gap", sub, name, reason: "truncated"|"no-replay"|"terminated", detail?, receivedAt }`';
+    '`{ seq, kind: "gap", sub, name, reason: "truncated"|"no-replay"|"terminated"|"disconnected", detail?, receivedAt }`';
 
   program
     .command('events-list')
@@ -1458,8 +1458,10 @@ ${chalk.bold('Notes:')}
   is acknowledged with events-ack, so consumers should be idempotent by seq.
   Gap records mark events that could not be delivered (the server skipped past
   our cursor, an event type without replay restarted, or the server ended the
-  subscription). Works while the session bridge is down. Each agent has its
-  own acknowledgements, selected with --agent or MCPC_AGENT.
+  subscription, or a push-only source was unreachable). Works while the session
+  bridge is down. Each agent has its own acknowledgements (--agent/MCPC_AGENT).
+  Servers declaring the claude/channel capability (Claude Code channels, MCP
+  2025-11-25 sessions) are journaled automatically as \`sub: "claude/channel"\`.
 
 ${chalk.bold('Examples:')}
   mcpc ${session} events-tail
@@ -1507,7 +1509,7 @@ ${jsonHelp('`{ agent, ackedThrough, acked: [seq, ...], unacked }`')}`
       'after',
       jsonHelp(
         'Object',
-        '`{ agent, unacked, unackedGaps, subscriptions: [{ id, name, arguments?, subscribedAt, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, unacked }] }`'
+        '`{ agent, unacked, unackedGaps, subscriptions: [{ source: "events"|"channel", id, name, arguments?, subscribedAt?, cursor, cursorUpdatedAt?, lastError?, terminatedAt?, unacked }] }`'
       )
     )
     .action(async (options, command) => {

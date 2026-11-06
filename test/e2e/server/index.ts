@@ -22,6 +22,9 @@
  *     own methods are 2026-07-28-only and live in index-v2.ts; serving them here
  *     would invent a dialect no server promises — this server exists so tests can
  *     prove the client refuses skills on a legacy connection.
+ *   WITH_CHANNEL - declare capabilities.experimental["claude/channel"] (Claude Code
+ *     channels); POST /control/channel-emit?content=...[&id=...] pushes
+ *     notifications/claude/channel to every session (default: false)
  *   WITH_OTHER_EXTENSIONS - also declare extensions mcpc does not implement (MCP Apps)
  *     and one vendor extension it cannot know, so tests can pin how they are reported
  *     (default: false)
@@ -90,6 +93,7 @@ const NO_RESOURCES = process.env.NO_RESOURCES === 'true';
 const NO_PROMPTS = process.env.NO_PROMPTS === 'true';
 const NO_COMPLETIONS = process.env.NO_COMPLETIONS === 'true';
 const WITH_SKILLS = process.env.WITH_SKILLS === 'true';
+const WITH_CHANNEL = process.env.WITH_CHANNEL === 'true';
 const WITH_OTHER_EXTENSIONS = process.env.WITH_OTHER_EXTENSIONS === 'true';
 // OAuth client-credentials grant test endpoints (metadata + /token). Opt-in so
 // other suites are unaffected. Expected credentials default to test values.
@@ -187,6 +191,10 @@ function createMcpServer(): Server {
       ...((capabilities.extensions as Record<string, unknown>) || {}),
       'io.modelcontextprotocol/skills': {},
     };
+  }
+
+  if (WITH_CHANNEL) {
+    capabilities.experimental = { 'claude/channel': {} };
   }
 
   // Extensions beyond the ones mcpc implements. A server declares what it serves on its
@@ -542,6 +550,23 @@ async function main() {
           res.writeHead(200);
           res.end('State reset');
           return;
+
+        case 'channel-emit': {
+          const content = url.searchParams.get('content') || 'hello';
+          const id = url.searchParams.get('id');
+          const params = {
+            content,
+            meta: { source: 'e2e', ...(id !== null && { message_id: id }) },
+          };
+          await Promise.all(
+            [...mcpServers.values()].map((s) =>
+              s.notification({ method: 'notifications/claude/channel', params })
+            )
+          );
+          res.writeHead(200);
+          res.end(`Sent claude/channel to ${mcpServers.size} session(s)`);
+          return;
+        }
 
         case 'notify-tools-changed':
           await Promise.all([...mcpServers.values()].map((s) => s.sendToolListChanged()));
